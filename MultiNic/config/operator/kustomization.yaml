@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: multinic-system
+
+resources:
+- ../rbac
+- ../manager
+- operator-deployment.yaml
+- operator-service-account.yaml
+- operator-role.yaml
+- operator-role-binding.yaml
+- multinic-operator-cr.yaml
+
+patchesStrategicMerge:
+- operator-manager-patch.yaml
+
+images:
+- name: controller
+  newName: multinic-operator
+  newTag: v1alpha1 

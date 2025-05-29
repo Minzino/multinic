@@ -1,0 +1,108 @@
+# MultiNic Helm Chart Values
+
+# Controller Configuration
+controller:
+  image:
+    repository: multinic
+    tag: latest
+    pullPolicy: Always
+  
+  replicas: 1
+  
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "10m"
+    limits:
+      memory: "128Mi"
+      cpu: "500m"
+  
+  # Health probe configuration
+  healthProbe:
+    port: 8082
+    path: /healthz
+  
+  # Metrics configuration
+  metrics:
+    enabled: true
+    port: 8080
+
+# Database Configuration
+database:
+  # Set to true to deploy MariaDB in Kubernetes
+  # Set to false to use external database
+  enabled: false
+  
+  # External database settings (when enabled: false)
+  external:
+    host: "110.0.0.101"
+    port: 30306
+    user: "root"
+    password: "cloud1234"
+    database: "multinic"
+  
+  # Internal database settings (when enabled: true)
+  internal:
+    image:
+      repository: mariadb
+      tag: "10.11"
+    
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""
+    
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+    
+    config:
+      rootPassword: "cloud1234"
+      database: "multinic"
+      user: "multinic"
+      password: "cloud1234"
+
+# OpenStack Configuration
+openstack:
+  # Default OpenStack endpoints
+  endpoints:
+    identity: "http://110.0.0.100:5000"
+    network: "http://110.0.0.100:9696"
+    compute: "http://110.0.0.100:8774"
+
+# Security Configuration
+security:
+  # Pod Security Context
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+  
+  # Container Security Context
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+      - ALL
+
+# Service Account
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# RBAC
+rbac:
+  create: true
+
+# Monitoring
+monitoring:
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s 

@@ -1,0 +1,41 @@
+apiVersion: multinic.example.com/v1alpha1
+kind: MultiNicOperator
+metadata:
+  name: multinic-operator-sample
+  namespace: multinic-system
+spec:
+  controller:
+    image: multinic:v1alpha1
+    replicas: 1
+    resources:
+      cpu: "100m"
+      memory: "128Mi"
+    healthProbe:
+      port: 8082
+      path: "/healthz"
+  
+  database:
+    enabled: true
+    image: mariadb:10.11
+    storageSize: "10Gi"
+    resources:
+      cpu: "200m"
+      memory: "256Mi"
+    credentials:
+      rootPassword: "cloud1234"
+      database: "multinic"
+      user: "multinic"
+      password: "cloud1234"
+  
+  openstack:
+    identityEndpoint: "http://110.0.0.101:5000/v3"
+    networkEndpoint: "http://110.0.0.101:9696/v2.0"
+    computeEndpoint: "http://110.0.0.101:8774/v2.1"
+  
+  protection:
+    enableMutationPrevention: true
+    enableAutoRecovery: true
+    allowedOperations:
+    - "get"
+    - "list"
+    - "watch" 

@@ -1,0 +1,73 @@
+# More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
+# Ignore build and test binaries.
+bin/
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+testbin/*
+Dockerfile.cross
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+node_modules/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Git files
+.git/
+.gitignore
+
+# Documentation
+README.md
+docs/
+
+# CI/CD files
+.github/
+.gitlab-ci.yml
+
+# Configuration files
+.golangci.yml
+
+# Test directories
+test/
+tests/
+
+# Build artifacts
+dist/
+build/
+
+# Go binaries
+*.tar.gz
+
+# Coverage files
+coverage.out
+coverage.html
