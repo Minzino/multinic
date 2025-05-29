@@ -1,0 +1,124 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: openstackconfigs.multinic.example.com
+spec:
+  group: multinic.example.com
+  names:
+    kind: OpenstackConfig
+    listKind: OpenstackConfigList
+    plural: openstackconfigs
+    singular: openstackconfig
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: OpenstackConfig is the Schema for the openstackconfigs API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: OpenstackConfigSpec defines the desired state of OpenstackConfig.
+            properties:
+              credentials:
+                description: OpenStackCredentials contains the credentials for OpenStack
+                  API
+                properties:
+                  authURL:
+                    description: AuthURL is the authentication URL for OpenStack
+                    type: string
+                  computeEndpoint:
+                    description: ComputeEndpoint is the URL for OpenStack Compute
+                      service (Nova)
+                    type: string
+                  domainName:
+                    description: DomainName is the name of the OpenStack domain
+                    type: string
+                  networkEndpoint:
+                    description: NetworkEndpoint is the URL for OpenStack Network
+                      service (Neutron)
+                    type: string
+                  password:
+                    description: Password for OpenStack authentication
+                    type: string
+                  projectID:
+                    description: ProjectID is the ID of the OpenStack project
+                    type: string
+                  username:
+                    description: Username for OpenStack authentication
+                    type: string
+                required:
+                - authURL
+                - domainName
+                - password
+                - projectID
+                - username
+                type: object
+              subnetName:
+                description: SubnetName is the name of the OpenStack subnet
+                type: string
+              vmName:
+                description: VMName is the name of the OpenStack VM
+                type: string
+            required:
+            - credentials
+            - subnetName
+            - vmName
+            type: object
+          status:
+            description: OpenstackConfigStatus defines the observed state of OpenstackConfig.
+            properties:
+              lastUpdated:
+                description: LastUpdated represents the last time the status was updated
+                format: date-time
+                type: string
+              message:
+                description: Message provides additional information about the current
+                  status
+                type: string
+              networkInfo:
+                description: NetworkInfo contains the network information retrieved
+                  from OpenStack
+                properties:
+                  ipAddress:
+                    description: IPAddress is the IP address assigned to the VM
+                    type: string
+                  macAddress:
+                    description: MACAddress is the MAC address of the VM's network
+                      interface
+                    type: string
+                  networkID:
+                    description: NetworkID is the ID of the OpenStack network
+                    type: string
+                  subnetID:
+                    description: SubnetID is the ID of the OpenStack subnet
+                    type: string
+                type: object
+              status:
+                description: Status represents the current status of the OpenstackConfig
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

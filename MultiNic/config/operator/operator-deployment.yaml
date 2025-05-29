@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multinic-operator
+  namespace: multinic-system
+  labels:
+    app: multinic-operator
+    control-plane: operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: multinic-operator
+  template:
+    metadata:
+      labels:
+        app: multinic-operator
+    spec:
+      serviceAccountName: multinic-operator
+      securityContext:
+        runAsNonRoot: true
+      containers:
+      - name: manager
+        image: multinic-operator:v1alpha1
+        command:
+        - /manager
+        args:
+        - --leader-elect
+        - --health-probe-bind-address=:8082
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8082
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi 

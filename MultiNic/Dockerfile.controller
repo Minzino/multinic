@@ -1,0 +1,40 @@
+# MultiNic Controller Dockerfile
+FROM golang:1.24-alpine AS builder
+
+# Install dependencies
+RUN apk add --no-cache git ca-certificates
+
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+
+# Copy go modules
+COPY go.mod go.mod
+COPY go.sum go.sum
+RUN go mod download
+
+# Copy source code
+COPY cmd/main.go cmd/main.go
+COPY api/ api/
+COPY internal/ internal/
+
+# Build controller binary
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+    -a -installsuffix cgo \
+    -ldflags='-w -s -extldflags "-static"' \
+    -o manager cmd/main.go
+
+# Final image
+FROM gcr.io/distroless/static:nonroot
+
+WORKDIR /
+COPY --from=builder /workspace/manager .
+
+USER 65532:65532
+
+LABEL maintainer="multinic-team"
+LABEL version="v1alpha1"
+LABEL description="MultiNic Controller"
+
+ENTRYPOINT ["/manager"] 
