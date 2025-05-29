@@ -13,13 +13,33 @@ NC='\033[0m' # No Color
 
 # 1. Docker 이미지 빌드
 echo -e "\n${BLUE}📦 1단계: Docker 이미지 빌드${NC}"
-nerdctl build -t multinic-operator:v1alpha1 .
+nerdctl build -t multinic:v1alpha1 .
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✅ Docker 이미지 빌드 완료${NC}"
 else
     echo -e "${RED}❌ Docker 이미지 빌드 실패${NC}"
     exit 1
 fi
+
+# 1.5. 이미지를 모든 노드에 배포
+echo -e "\n${BLUE}🚚 1.5단계: 이미지 배포${NC}"
+echo "이미지를 모든 노드에 배포..."
+nerdctl save multinic:v1alpha1 -o multinic-v1alpha1.tar
+
+NODES=(biz1 biz2 biz3)
+for node in "${NODES[@]}"; do
+    echo "📦 $node 노드에 이미지 전송 중..."
+    scp multinic-v1alpha1.tar $node:/tmp/
+    
+    echo "🔧 $node 노드에 이미지 로드 중..."
+    ssh $node "sudo nerdctl load -i /tmp/multinic-v1alpha1.tar && rm /tmp/multinic-v1alpha1.tar"
+    
+    echo "✅ $node 노드 완료"
+done
+
+echo "🗑️ 로컬 tar 파일 정리..."
+rm -f multinic-v1alpha1.tar
+echo -e "${GREEN}✅ 모든 노드에 이미지 배포 완료${NC}"
 
 # 2. CRD 적용
 echo -e "\n${BLUE}📋 2단계: CRD 설치${NC}"

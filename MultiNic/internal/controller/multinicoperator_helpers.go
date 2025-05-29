@@ -18,13 +18,16 @@ package controllers
 
 import (
 	"context"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	multinicv1alpha1 "github.com/xormsdhkdwk/multinic/api/v1alpha1"
 )
@@ -111,7 +114,7 @@ func (r *MultiNicOperatorReconciler) buildDatabaseStatefulSet(operator *multinic
 							LivenessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									Exec: &corev1.ExecAction{
-										Command: []string{"mysqladmin", "ping", "-h", "localhost"},
+										Command: []string{"mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pcloud1234"},
 									},
 								},
 								InitialDelaySeconds: 30,
@@ -201,6 +204,7 @@ func (r *MultiNicOperatorReconciler) buildControllerDeployment(operator *multini
 
 	// Database connection environment variables
 	env := []corev1.EnvVar{
+		{Name: "CONTROLLER_MODE", Value: "true"},
 		{Name: "DB_HOST", Value: "mariadb.multinic-system.svc.cluster.local"},
 		{Name: "DB_PORT", Value: "3306"},
 		{Name: "DB_USER", Value: "root"},
@@ -246,6 +250,7 @@ func (r *MultiNicOperatorReconciler) buildControllerDeployment(operator *multini
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					ServiceAccountName: "multinic-operator",
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &[]bool{true}[0],
 					},
@@ -255,7 +260,6 @@ func (r *MultiNicOperatorReconciler) buildControllerDeployment(operator *multini
 							Image:   image,
 							Command: []string{"/manager"},
 							Args: []string{
-								"--leader-elect",
 								"--health-probe-bind-address=:8082",
 							},
 							Env: env,
@@ -321,50 +325,79 @@ func (r *MultiNicOperatorReconciler) getResourceRequirements(config multinicv1al
 	return requirements
 }
 
-// addProtectionLabels adds protection labels to resources
+// addProtectionLabels adds protection labels to resources with retry logic
 func (r *MultiNicOperatorReconciler) addProtectionLabels(ctx context.Context, kind, name, namespace string, labels map[string]string) error {
-	switch kind {
-	case "StatefulSet":
-		obj := &appsv1.StatefulSet{}
-		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
-			return err
-		}
-		if obj.Labels == nil {
-			obj.Labels = make(map[string]string)
-		}
-		for k, v := range labels {
-			obj.Labels[k] = v
-		}
-		return r.Update(ctx, obj)
+	return wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+		switch kind {
+		case "StatefulSet":
+			obj := &appsv1.StatefulSet{}
+			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
+				if errors.IsNotFound(err) {
+					return false, nil // Not found, retry
+				}
+				return false, err
+			}
+			if obj.Labels == nil {
+				obj.Labels = make(map[string]string)
+			}
+			for k, v := range labels {
+				obj.Labels[k] = v
+			}
+			if err := r.Update(ctx, obj); err != nil {
+				if errors.IsConflict(err) {
+					return false, nil // Conflict, retry
+				}
+				return false, err
+			}
+			return true, nil
 
-	case "Deployment":
-		obj := &appsv1.Deployment{}
-		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
-			return err
-		}
-		if obj.Labels == nil {
-			obj.Labels = make(map[string]string)
-		}
-		for k, v := range labels {
-			obj.Labels[k] = v
-		}
-		return r.Update(ctx, obj)
+		case "Deployment":
+			obj := &appsv1.Deployment{}
+			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
+				if errors.IsNotFound(err) {
+					return false, nil // Not found, retry
+				}
+				return false, err
+			}
+			if obj.Labels == nil {
+				obj.Labels = make(map[string]string)
+			}
+			for k, v := range labels {
+				obj.Labels[k] = v
+			}
+			if err := r.Update(ctx, obj); err != nil {
+				if errors.IsConflict(err) {
+					return false, nil // Conflict, retry
+				}
+				return false, err
+			}
+			return true, nil
 
-	case "Service":
-		obj := &corev1.Service{}
-		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
-			return err
+		case "Service":
+			obj := &corev1.Service{}
+			if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, obj); err != nil {
+				if errors.IsNotFound(err) {
+					return false, nil // Not found, retry
+				}
+				return false, err
+			}
+			if obj.Labels == nil {
+				obj.Labels = make(map[string]string)
+			}
+			for k, v := range labels {
+				obj.Labels[k] = v
+			}
+			if err := r.Update(ctx, obj); err != nil {
+				if errors.IsConflict(err) {
+					return false, nil // Conflict, retry
+				}
+				return false, err
+			}
+			return true, nil
 		}
-		if obj.Labels == nil {
-			obj.Labels = make(map[string]string)
-		}
-		for k, v := range labels {
-			obj.Labels[k] = v
-		}
-		return r.Update(ctx, obj)
-	}
 
-	return nil
+		return true, nil
+	})
 }
 
 // removeProtection removes protection labels from managed resources

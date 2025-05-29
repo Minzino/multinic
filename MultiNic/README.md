@@ -40,10 +40,10 @@ make test
 
 ```bash
 # 최적화된 Docker 이미지 빌드
-make docker-build IMG=multinic:latest
+make docker-build IMG=multinic:v1alpha1
 
 # 멀티 아키텍처 빌드
-make docker-buildx IMG=multinic:latest
+make docker-buildx IMG=multinic:v1alpha1
 ```
 
 ### 3. Kubernetes 배포
@@ -56,7 +56,7 @@ make install
 kubectl apply -f config/manager/db-secret.yaml
 
 # 컨트롤러 배포
-make deploy IMG=multinic:latest
+make deploy IMG=multinic:v1alpha1
 ```
 
 ## ⚙️ 설정
@@ -264,7 +264,7 @@ metadata:
   namespace: multinic-system
 spec:
   controller:
-    image: multinic:latest
+    image: multinic:v1alpha1
     replicas: 2
     resources:
       cpu: "200m"

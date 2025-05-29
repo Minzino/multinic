@@ -1,0 +1,587 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/component: manager
+    app.kubernetes.io/created-by: multinic
+    app.kubernetes.io/instance: system
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: namespace
+    app.kubernetes.io/part-of: multinic
+    control-plane: controller-manager
+  name: multinic-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: openstackconfigs.multinic.example.com
+spec:
+  group: multinic.example.com
+  names:
+    kind: OpenstackConfig
+    listKind: OpenstackConfigList
+    plural: openstackconfigs
+    singular: openstackconfig
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: OpenstackConfig is the Schema for the openstackconfigs API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: OpenstackConfigSpec defines the desired state of OpenstackConfig.
+            properties:
+              credentials:
+                description: OpenStackCredentials contains the credentials for OpenStack
+                  API
+                properties:
+                  authURL:
+                    description: AuthURL is the authentication URL for OpenStack
+                    type: string
+                  computeEndpoint:
+                    description: ComputeEndpoint is the URL for OpenStack Compute
+                      service (Nova)
+                    type: string
+                  domainName:
+                    description: DomainName is the name of the OpenStack domain
+                    type: string
+                  networkEndpoint:
+                    description: NetworkEndpoint is the URL for OpenStack Network
+                      service (Neutron)
+                    type: string
+                  password:
+                    description: Password for OpenStack authentication
+                    type: string
+                  projectID:
+                    description: ProjectID is the ID of the OpenStack project
+                    type: string
+                  username:
+                    description: Username for OpenStack authentication
+                    type: string
+                required:
+                - authURL
+                - domainName
+                - password
+                - projectID
+                - username
+                type: object
+              subnetName:
+                description: SubnetName is the name of the OpenStack subnet
+                type: string
+              vmName:
+                description: VMName is the name of the OpenStack VM
+                type: string
+            required:
+            - credentials
+            - subnetName
+            - vmName
+            type: object
+          status:
+            description: OpenstackConfigStatus defines the observed state of OpenstackConfig.
+            properties:
+              lastUpdated:
+                description: LastUpdated represents the last time the status was updated
+                format: date-time
+                type: string
+              message:
+                description: Message provides additional information about the current
+                  status
+                type: string
+              networkInfo:
+                description: NetworkInfo contains the network information retrieved
+                  from OpenStack
+                properties:
+                  ipAddress:
+                    description: IPAddress is the IP address assigned to the VM
+                    type: string
+                  macAddress:
+                    description: MACAddress is the MAC address of the VM's network
+                      interface
+                    type: string
+                  networkID:
+                    description: NetworkID is the ID of the OpenStack network
+                    type: string
+                  subnetID:
+                    description: SubnetID is the ID of the OpenStack subnet
+                    type: string
+                type: object
+              status:
+                description: Status represents the current status of the OpenstackConfig
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: multinic
+  name: multinic-controller-manager
+  namespace: multinic-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: multinic
+  name: multinic-leader-election-role
+  namespace: multinic-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multinic-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  - secrets
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - statefulsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - multinic.example.com
+  resources:
+  - multinicoperators
+  - openstackconfigs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - multinic.example.com
+  resources:
+  - multinicoperators/finalizers
+  - openstackconfigs/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - multinic.example.com
+  resources:
+  - multinicoperators/status
+  - openstackconfigs/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multinic-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: multinic-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: multinic
+  name: multinic-openstackconfig-admin-role
+rules:
+- apiGroups:
+  - multinic.example.com
+  resources:
+  - openstackconfigs
+  verbs:
+  - '*'
+- apiGroups:
+  - multinic.example.com
+  resources:
+  - openstackconfigs/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: multinic
+  name: multinic-openstackconfig-editor-role
+rules:
+- apiGroups:
+  - multinic.example.com
+  resources:
+  - openstackconfigs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - multinic.example.com
+  resources:
+  - openstackconfigs/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: multinic
+  name: multinic-openstackconfig-viewer-role
+rules:
+- apiGroups:
+  - multinic.example.com
+  resources:
+  - openstackconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - multinic.example.com
+  resources:
+  - openstackconfigs/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: multinic
+  name: multinic-leader-election-rolebinding
+  namespace: multinic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: multinic-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: multinic-controller-manager
+  namespace: multinic-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: multinic
+  name: multinic-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: multinic-manager-role
+subjects:
+- kind: ServiceAccount
+  name: multinic-controller-manager
+  namespace: multinic-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: multinic-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: multinic-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: multinic-controller-manager
+  namespace: multinic-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: multinic
+    control-plane: controller-manager
+  name: multinic-controller-manager-metrics-service
+  namespace: multinic-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app.kubernetes.io/name: multinic
+    control-plane: controller-manager
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: multinic-mariadb
+  namespace: multinic-system
+spec:
+  ports:
+  - port: 3306
+    targetPort: 3306
+  selector:
+    app: mariadb
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: multinic-mariadb-pvc
+  namespace: multinic-system
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: manager
+    app.kubernetes.io/created-by: multinic
+    app.kubernetes.io/instance: controller-manager
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: deployment
+    app.kubernetes.io/part-of: multinic
+    control-plane: controller-manager
+  name: multinic-controller-manager
+  namespace: multinic-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --metrics-bind-address=:8443
+        - --leader-elect
+        - --health-probe-bind-address=:8082
+        command:
+        - /manager
+        env:
+        - name: DB_HOST
+          value: mariadb.multinic-system.svc.cluster.local
+        - name: DB_PORT
+          value: "3306"
+        - name: DB_USER
+          value: root
+        - name: DB_PASSWORD
+          value: cloud1234
+        - name: DB_NAME
+          value: multinic
+        image: multinic:v1alpha1
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8082
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports: []
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8082
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts: []
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: multinic-controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes: []
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: multinic-mariadb
+  namespace: multinic-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mariadb
+  serviceName: multinic-mariadb
+  template:
+    metadata:
+      labels:
+        app: mariadb
+    spec:
+      containers:
+      - env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: cloud1234
+        - name: MYSQL_DATABASE
+          value: multinic
+        - name: MYSQL_USER
+          value: multinic
+        - name: MYSQL_PASSWORD
+          value: cloud1234
+        image: mariadb:10.11
+        livenessProbe:
+          exec:
+            command:
+            - mysqladmin
+            - ping
+            - -h
+            - localhost
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        name: mariadb
+        ports:
+        - containerPort: 3306
+          name: mysql
+        readinessProbe:
+          exec:
+            command:
+            - mysql
+            - -h
+            - localhost
+            - -u
+            - root
+            - -pcloud1234
+            - -e
+            - SELECT 1
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        volumeMounts:
+        - mountPath: /var/lib/mysql
+          name: mysql-storage
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql-storage
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi

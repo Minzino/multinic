@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/multinic.example.com_openstackconfigs.yaml
+- bases/multinic.example.com_multinicoperators.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

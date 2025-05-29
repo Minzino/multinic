@@ -71,7 +71,8 @@ echo -e "\n${BLUE}🐳 6단계: Docker 이미지 정리${NC}"
 read -p "MultiNic Docker 이미지를 삭제하시겠습니까? (y/N): " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    nerdctl rmi multinic-operator:v1alpha1 multinic:latest --force 2>/dev/null || true
+    echo "🗑️ MultiNic Docker 이미지 삭제 중..."
+    nerdctl rmi multinic:v1alpha1 --force 2>/dev/null || true
     echo -e "${GREEN}✅ Docker 이미지 삭제 완료${NC}"
 else
     echo -e "${YELLOW}⚠️  Docker 이미지는 유지됩니다${NC}"

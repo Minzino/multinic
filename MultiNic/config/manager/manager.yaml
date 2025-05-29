@@ -71,7 +71,8 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8082
-        image: controller:latest
+        image: multinic:v1alpha1
+        imagePullPolicy: Never
         name: manager
         env:
           - name: DB_HOST
