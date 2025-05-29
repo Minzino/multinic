@@ -29,7 +29,7 @@ type MultiNicOperatorSpec struct {
 	Database DatabaseConfig `json:"database"`
 
 	// OpenStack configuration
-	OpenStack OpenStackConfig `json:"openstack"`
+	OpenStack OpenStackConfig `json:"openstack,omitempty"`
 
 	// Protection settings
 	Protection ProtectionConfig `json:"protection,omitempty"`

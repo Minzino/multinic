@@ -49,7 +49,7 @@ const (
 	// Database configuration
 	dbRetryInterval   = 10 * time.Second
 	maxRetries        = 3
-	reconcileInterval = time.Minute
+	reconcileInterval = 5 * time.Minute
 	finalizerName     = "multinic.example.com/finalizer"
 
 	// Database connection configuration
@@ -424,12 +424,12 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 
 	// Insert into node_table first (before multi_interface due to foreign key)
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO node_table (id, attached_node_id, attached_node_name, status, created_at, modified_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO node_table (attached_node_id, attached_node_name, status, created_at, modified_at)
+		VALUES (?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
-		attached_node_id=?, attached_node_name=?, status=?, modified_at=?`,
-		targetVM.ID, targetVM.ID, targetVM.Name, "active", createdAt, modifiedAt,
-		targetVM.ID, targetVM.Name, "active", modifiedAt,
+		attached_node_name=?, status=?, modified_at=?`,
+		targetVM.ID, targetVM.Name, "active", createdAt, modifiedAt,
+		targetVM.Name, "active", modifiedAt,
 	)
 	if err != nil {
 		log.Error(err, "Failed to insert node information")
@@ -447,27 +447,48 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		for _, address := range addresses.([]interface{}) {
 			addr := address.(map[string]interface{})
 
-			// nil 체크 추가
-			if addr["OS-EXT-IPS:type"] == nil || addr["port"] == nil || addr["OS-EXT-IPS-MAC:mac_addr"] == nil {
-				log.Info("Skipping address entry due to missing fields",
+			// type과 mac_addr 필드 체크 (port는 없을 수 있음)
+			if addr["OS-EXT-IPS:type"] == nil || addr["OS-EXT-IPS-MAC:mac_addr"] == nil {
+				log.Info("Skipping address entry due to missing required fields",
 					"address", addr,
 					"has_type", addr["OS-EXT-IPS:type"] != nil,
-					"has_port", addr["port"] != nil,
 					"has_mac", addr["OS-EXT-IPS-MAC:mac_addr"] != nil)
 				continue
 			}
 
 			if addr["OS-EXT-IPS:type"].(string) == "fixed" {
-				portID, ok := addr["port"].(string)
-				if !ok {
-					log.Info("Port ID is not a string, skipping", "port", addr["port"])
-					continue
-				}
-
 				macAddr, ok := addr["OS-EXT-IPS-MAC:mac_addr"].(string)
 				if !ok {
 					log.Info("MAC address is not a string, skipping", "mac", addr["OS-EXT-IPS-MAC:mac_addr"])
 					continue
+				}
+
+				var portID string
+
+				// port 필드가 있으면 직접 사용
+				if addr["port"] != nil {
+					if id, ok := addr["port"].(string); ok {
+						portID = id
+						log.Info("Using port ID from VM address info", "port_id", portID, "mac_addr", macAddr)
+					}
+				}
+
+				// port 필드가 없거나 유효하지 않으면 MAC 주소로 포트 조회
+				if portID == "" {
+					log.Info("Port ID not available, searching by MAC address", "mac_addr", macAddr)
+
+					// MAC 주소로 포트 조회
+					foundPortID, err := r.findPortByMACAddress(ctx, openstackConfig, macAddr, subnet.ID)
+					if err != nil {
+						log.Error(err, "Failed to find port by MAC address", "mac_addr", macAddr)
+						continue
+					}
+					if foundPortID == "" {
+						log.Info("No port found for MAC address", "mac_addr", macAddr)
+						continue
+					}
+					portID = foundPortID
+					log.Info("Found port ID by MAC address", "port_id", portID, "mac_addr", macAddr)
 				}
 
 				// Insert into multi_interface
@@ -488,6 +509,7 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 					"port_id", portID,
 					"mac_address", macAddr,
 					"vm_id", targetVM.ID,
+					"subnet_id", subnet.ID,
 					"created_at", createdAt,
 					"modified_at", modifiedAt)
 			}
@@ -498,6 +520,12 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 	if err := tx.Commit(); err != nil {
 		log.Error(err, "Failed to commit transaction")
 		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+	}
+
+	// Ensure DB connection is properly maintained after transaction
+	if err := r.DB.PingContext(ctx); err != nil {
+		log.Info("DB connection lost after transaction, will reconnect on next reconcile", "error", err)
+		r.DB = nil // Force reconnection on next reconcile
 	}
 
 	// Update status
@@ -686,11 +714,44 @@ func (r *OpenstackConfigReconciler) getSubnetInfoWithClients(ctx context.Context
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *OpenstackConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Initialize MariaDB connection
-	if err := r.ensureDBConnection(context.Background()); err != nil {
-		return fmt.Errorf("failed to initialize database connection: %v", err)
-	}
+	// Note: Database connection will be established on first reconcile
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&multinicv1alpha1.OpenstackConfig{}).
+		Complete(r)
+}
 
+// ensureDBConnection ensures that the database connection is active
+func (r *OpenstackConfigReconciler) ensureDBConnection(ctx context.Context) error {
+	if r.DB == nil || r.DB.PingContext(ctx) != nil {
+		dsn := r.buildDSN()
+		db, err := sql.Open("mysql", dsn)
+		if err != nil {
+			return fmt.Errorf("failed to connect to MariaDB: %v", err)
+		}
+
+		// Configure connection pool with optimized settings
+		db.SetMaxOpenConns(5)                   // 연결 수 줄임 (기존: 10)
+		db.SetMaxIdleConns(2)                   // 유휴 연결 수 줄임 (기존: 5)
+		db.SetConnMaxLifetime(10 * time.Minute) // 연결 수명 단축 (기존: 1시간)
+		db.SetConnMaxIdleTime(5 * time.Minute)  // 유휴 연결 타임아웃 추가
+
+		r.DB = db
+
+		// Test connection
+		if err := r.DB.PingContext(ctx); err != nil {
+			return fmt.Errorf("failed to ping MariaDB: %v", err)
+		}
+
+		// Initialize database tables
+		if err := r.initializeDatabase(); err != nil {
+			return fmt.Errorf("failed to initialize database: %v", err)
+		}
+	}
+	return nil
+}
+
+// initializeDatabase creates/updates database tables
+func (r *OpenstackConfigReconciler) initializeDatabase() error {
 	// Create/Update tables
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS multi_subnet (
@@ -703,7 +764,7 @@ func (r *OpenstackConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			deleted_at TIMESTAMP NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS node_table (
-			id VARCHAR(36) PRIMARY KEY,
+			id INT AUTO_INCREMENT PRIMARY KEY,
 			attached_node_id VARCHAR(36) NOT NULL UNIQUE,
 			attached_node_name VARCHAR(255) NOT NULL,
 			status VARCHAR(50) DEFAULT 'created',
@@ -761,27 +822,6 @@ func (r *OpenstackConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&multinicv1alpha1.OpenstackConfig{}).
-		Complete(r)
-}
-
-// ensureDBConnection ensures that the database connection is active
-func (r *OpenstackConfigReconciler) ensureDBConnection(ctx context.Context) error {
-	if r.DB == nil || r.DB.PingContext(ctx) != nil {
-		dsn := r.buildDSN()
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			return fmt.Errorf("failed to connect to MariaDB: %v", err)
-		}
-
-		// Configure connection pool
-		db.SetMaxOpenConns(10)
-		db.SetMaxIdleConns(5)
-		db.SetConnMaxLifetime(time.Hour)
-
-		r.DB = db
-	}
 	return nil
 }
 
@@ -927,7 +967,7 @@ func getEnvOrDefault(key, defaultValue string) string {
 // buildDSN builds database connection string
 func (r *OpenstackConfigReconciler) buildDSN() string {
 	config := r.getDatabaseConfig()
-	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?tls=false&timeout=30s",
+	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?tls=false&timeout=30s&readTimeout=30s&writeTimeout=30s&parseTime=true&loc=Local&charset=utf8mb4&collation=utf8mb4_unicode_ci",
 		config.User, config.Password, config.Host, config.Port, config.DBName)
 }
 
@@ -964,4 +1004,117 @@ func normalizeEndpoint(endpoint, suffix string) string {
 		endpoint = strings.TrimSuffix(endpoint, "/") + suffix
 	}
 	return endpoint
+}
+
+// findPortByMACAddress finds a port ID based on a MAC address and validates it belongs to the target subnet
+func (r *OpenstackConfigReconciler) findPortByMACAddress(ctx context.Context, openstackConfig *multinicv1alpha1.OpenstackConfig, macAddr string, targetSubnetID string) (string, error) {
+	log := log.FromContext(ctx)
+
+	// Create network client
+	authURL := openstackConfig.Spec.Credentials.AuthURL
+	if !strings.HasSuffix(authURL, "/v3") {
+		authURL = strings.TrimSuffix(authURL, "/") + "/v3"
+	}
+
+	opts := gophercloud.AuthOptions{
+		IdentityEndpoint: authURL,
+		Username:         openstackConfig.Spec.Credentials.Username,
+		Password:         openstackConfig.Spec.Credentials.Password,
+		TenantID:         openstackConfig.Spec.Credentials.ProjectID,
+		DomainName:       openstackConfig.Spec.Credentials.DomainName,
+		AllowReauth:      true,
+		Scope: &gophercloud.AuthScope{
+			ProjectID: openstackConfig.Spec.Credentials.ProjectID,
+		},
+	}
+
+	networkEndpoint := openstackConfig.Spec.Credentials.NetworkEndpoint
+	if !strings.HasSuffix(networkEndpoint, "/v2.0") {
+		networkEndpoint = strings.TrimSuffix(networkEndpoint, "/")
+		networkEndpoint = networkEndpoint + "/v2.0"
+	}
+
+	networkClient, err := createOpenStackClient(ctx, opts, networkEndpoint, "network")
+	if err != nil {
+		return "", err
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+
+	// Query ports by MAC address
+	portRequestURL := networkClient.Endpoint + "/ports?mac_address=" + macAddr
+	log.Info("Searching for port by MAC address", "url", portRequestURL, "mac_addr", macAddr, "target_subnet_id", targetSubnetID)
+
+	portReq, err := http.NewRequest("GET", portRequestURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create port HTTP request: %v", err)
+	}
+
+	portReq.Header.Set("X-Auth-Token", networkClient.TokenID)
+	portReq.Header.Set("Content-Type", "application/json")
+
+	portResp, err := client.Do(portReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to execute port HTTP request: %v", err)
+	}
+	defer portResp.Body.Close()
+
+	portBody, err := io.ReadAll(portResp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read port response body: %v", err)
+	}
+
+	log.Info("Port HTTP response received", "status", portResp.Status, "bodyLength", len(portBody))
+
+	if portResp.StatusCode != 200 {
+		return "", fmt.Errorf("port query failed with status %d: %s", portResp.StatusCode, string(portBody))
+	}
+
+	// Parse JSON response
+	var portResponse struct {
+		Ports []struct {
+			ID         string `json:"id"`
+			MACAddress string `json:"mac_address"`
+			FixedIPs   []struct {
+				SubnetID  string `json:"subnet_id"`
+				IPAddress string `json:"ip_address"`
+			} `json:"fixed_ips"`
+		} `json:"ports"`
+	}
+
+	err = json.Unmarshal(portBody, &portResponse)
+	if err != nil {
+		return "", fmt.Errorf("failed to unmarshal port response: %v", err)
+	}
+
+	if len(portResponse.Ports) == 0 {
+		log.Info("No ports found for MAC address", "mac_addr", macAddr)
+		return "", nil
+	}
+
+	// Find port that belongs to the target subnet
+	for _, port := range portResponse.Ports {
+		for _, fixedIP := range port.FixedIPs {
+			if fixedIP.SubnetID == targetSubnetID {
+				log.Info("Found port in target subnet",
+					"mac_addr", macAddr,
+					"port_id", port.ID,
+					"target_subnet_id", targetSubnetID,
+					"ip_address", fixedIP.IPAddress)
+				return port.ID, nil
+			}
+		}
+		log.Info("Port found but not in target subnet",
+			"mac_addr", macAddr,
+			"port_id", port.ID,
+			"port_subnets", port.FixedIPs,
+			"target_subnet_id", targetSubnetID)
+	}
+
+	log.Info("No ports found in target subnet for MAC address", "mac_addr", macAddr, "target_subnet_id", targetSubnetID)
+	return "", nil
 }

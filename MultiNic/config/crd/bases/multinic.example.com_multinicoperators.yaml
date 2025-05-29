@@ -165,7 +165,6 @@ spec:
             required:
             - controller
             - database
-            - openstack
             type: object
           status:
             description: MultiNicOperatorStatus defines the observed state of MultiNicOperator

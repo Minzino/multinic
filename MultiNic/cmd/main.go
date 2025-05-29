@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"net/http"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -31,7 +32,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	multinicv1alpha1 "github.com/xormsdhkdwk/multinic/api/v1alpha1"
 	controllers "github.com/xormsdhkdwk/multinic/internal/controller"
@@ -83,9 +83,6 @@ func main() {
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
 		},
-		WebhookServer: webhook.NewServer(webhook.Options{
-			Port: 9443,
-		}),
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "cd5ae1b8.example.com",
@@ -95,35 +92,39 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controllers.OpenstackConfigReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "OpenstackConfig")
-		os.Exit(1)
-	}
-
-	if err = (&controllers.MultiNicOperatorReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "MultiNicOperator")
-		os.Exit(1)
-	}
-
-	// Create OpenstackConfig reconciler for health checks
-	reconciler := &controllers.OpenstackConfigReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+	// Register controllers based on mode
+	if os.Getenv("CONTROLLER_MODE") == "" {
+		// Operator mode: only register MultiNicOperator controller
+		if err = (&controllers.MultiNicOperatorReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "MultiNicOperator")
+			os.Exit(1)
+		}
+	} else {
+		// Controller mode: register OpenstackConfig controller
+		setupLog.Info("Running in controller mode - registering OpenstackConfig reconciler")
+		if err = (&controllers.OpenstackConfigReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "OpenstackConfig")
+			os.Exit(1)
+		}
 	}
 
 	//+kubebuilder:scaffold:builder
 
-	if err := mgr.AddHealthzCheck("healthz", reconciler.GetHealthChecker()); err != nil {
+	if err := mgr.AddHealthzCheck("healthz", func(req *http.Request) error {
+		return nil
+	}); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", reconciler.GetHealthChecker()); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
+		return nil
+	}); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}

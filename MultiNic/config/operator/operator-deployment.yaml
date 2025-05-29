@@ -21,7 +21,8 @@ spec:
         runAsNonRoot: true
       containers:
       - name: manager
-        image: multinic-operator:v1alpha1
+        image: multinic:v1alpha1
+        imagePullPolicy: Never
         command:
         - /manager
         args:
