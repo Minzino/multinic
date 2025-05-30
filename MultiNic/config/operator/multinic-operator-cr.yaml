@@ -26,6 +26,10 @@ spec:
       database: "multinic"
       user: "multinic"
       password: "cloud1234"
+    service:
+      type: "NodePort"
+      nodePort: 30305
+      port: 3306
   
   protection:
     enableMutationPrevention: true

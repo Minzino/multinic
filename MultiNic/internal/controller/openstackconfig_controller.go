@@ -18,8 +18,10 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -48,14 +51,14 @@ import (
 const (
 	// Database configuration
 	dbRetryInterval   = 10 * time.Second
-	maxRetries        = 3
+	dbMaxRetries      = 5
 	reconcileInterval = 5 * time.Minute
 	finalizerName     = "multinic.example.com/finalizer"
 
 	// Database connection configuration
-	defaultDBHost     = "110.0.0.101"
-	defaultDBPort     = "30306"
-	defaultDBUser     = "root"
+	defaultDBHost     = "mariadb"
+	defaultDBPort     = "3306"
+	defaultDBUserName = "root"
 	defaultDBPassword = "cloud1234"
 	defaultDBName     = "multinic"
 
@@ -69,6 +72,15 @@ const (
 	identityEndpointSuffix = "/v3"
 	networkEndpointSuffix  = "/v2.0"
 	computeEndpointSuffix  = "/v2.1"
+
+	// Database connection pool settings
+	maxOpenConns    = 25
+	maxIdleConns    = 10
+	connMaxLifetime = 30 * time.Minute
+	connMaxIdleTime = 5 * time.Minute
+
+	// OpenStack retry settings
+	openstackMaxRetries = 3
 )
 
 // DatabaseConfig holds database configuration
@@ -94,9 +106,11 @@ type OpenstackConfig struct {
 // OpenstackConfigReconciler reconciles a OpenstackConfig object
 type OpenstackConfigReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	DB       *sql.DB
-	DBConfig *DatabaseConfig
+	Scheme      *runtime.Scheme
+	DB          *sql.DB
+	DBConfig    *DatabaseConfig
+	HTTPClient  *http.Client
+	clientMutex sync.RWMutex
 }
 
 // +kubebuilder:rbac:groups=multinic.example.com,resources=openstackconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -105,45 +119,207 @@ type OpenstackConfigReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the OpenstackConfig object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *OpenstackConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	startTime := time.Now()
 	log := log.FromContext(ctx)
 
-	// Ensure DB connection
-	if err := r.ensureDBConnection(ctx); err != nil {
-		log.Error(err, "Failed to ensure database connection")
+	defer func() {
+		duration := time.Since(startTime).Seconds()
+		OpenstackRequestDuration.WithLabelValues("reconcile", "completed").Observe(duration)
+	}()
+
+	log.Info("Starting reconciliation", "openstackconfig", req.NamespacedName)
+
+	// Ensure DB connection with retry
+	if err := r.ensureDBConnectionWithRetry(ctx); err != nil {
+		log.Error(err, "Failed to ensure database connection after retries")
+		ReconcileTotal.WithLabelValues("db_error").Inc()
 		return ctrl.Result{RequeueAfter: dbRetryInterval}, err
 	}
 
 	// Fetch the OpenstackConfig instance
 	openstackConfig := &multinicv1alpha1.OpenstackConfig{}
 	if err := r.Client.Get(ctx, req.NamespacedName, openstackConfig); err != nil {
+		ReconcileTotal.WithLabelValues("not_found").Inc()
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Handle deletion
 	if openstackConfig.DeletionTimestamp != nil {
-		return r.handleDeletion(ctx, openstackConfig)
+		result, err := r.handleDeletion(ctx, openstackConfig)
+		if err != nil {
+			ReconcileTotal.WithLabelValues("deletion_error").Inc()
+		} else {
+			ReconcileTotal.WithLabelValues("deleted").Inc()
+		}
+		return result, err
 	}
 
 	// Add finalizer if not present
 	if !controllerutil.ContainsFinalizer(openstackConfig, finalizerName) {
+		log.Info("Adding finalizer")
 		controllerutil.AddFinalizer(openstackConfig, finalizerName)
 		if err := r.Update(ctx, openstackConfig); err != nil {
 			log.Error(err, "Failed to add finalizer")
+			ReconcileTotal.WithLabelValues("finalizer_error").Inc()
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Continue with normal reconciliation logic...
-	return r.reconcileNormal(ctx, openstackConfig)
+	// Continue with normal reconciliation logic
+	result, err := r.reconcileNormal(ctx, openstackConfig)
+	if err != nil {
+		ReconcileTotal.WithLabelValues("reconcile_error").Inc()
+	} else {
+		ReconcileTotal.WithLabelValues("success").Inc()
+	}
+
+	return result, err
+}
+
+// ensureDBConnectionWithRetry ensures database connection with retry logic
+func (r *OpenstackConfigReconciler) ensureDBConnectionWithRetry(ctx context.Context) error {
+	var lastErr error
+
+	for i := 0; i < dbMaxRetries; i++ {
+		if err := r.ensureDBConnection(ctx); err != nil {
+			lastErr = err
+			log := log.FromContext(ctx)
+			log.Error(err, "Database connection attempt failed", "attempt", i+1, "max_retries", dbMaxRetries)
+
+			if i < dbMaxRetries-1 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(time.Duration(i+1) * time.Second): // exponential backoff
+					continue
+				}
+			}
+		} else {
+			return nil // Success
+		}
+	}
+
+	return fmt.Errorf("failed to establish database connection after %d retries: %w", dbMaxRetries, lastErr)
+}
+
+// ensureDBConnection ensures database connection is available
+func (r *OpenstackConfigReconciler) ensureDBConnection(ctx context.Context) error {
+	if r.DB == nil {
+		if err := r.connectToDatabase(ctx); err != nil {
+			return err
+		}
+	}
+
+	// Test connection
+	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := r.DB.PingContext(ctxTimeout); err != nil {
+		// Connection lost, try to reconnect
+		if err := r.connectToDatabase(ctx); err != nil {
+			return fmt.Errorf("failed to reconnect to database: %w", err)
+		}
+	}
+
+	// Update connection metrics
+	stats := r.DB.Stats()
+	ActiveConnections.Set(float64(stats.OpenConnections))
+
+	return nil
+}
+
+// connectToDatabase establishes database connection with optimized settings
+func (r *OpenstackConfigReconciler) connectToDatabase(ctx context.Context) error {
+	log := log.FromContext(ctx)
+
+	if r.DBConfig == nil {
+		r.DBConfig = r.getDatabaseConfig()
+	}
+
+	dsn := r.buildDSN()
+	log.Info("Connecting to database", "host", r.DBConfig.Host, "port", r.DBConfig.Port, "database", r.DBConfig.DBName)
+
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return fmt.Errorf("failed to open database connection: %w", err)
+	}
+
+	// Configure connection pool for optimal performance
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxLifetime(connMaxLifetime)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
+
+	// Test connection
+	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctxTimeout); err != nil {
+		db.Close()
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	// Close existing connection if any
+	if r.DB != nil {
+		r.DB.Close()
+	}
+
+	r.DB = db
+
+	// Initialize database schema if needed
+	if err := r.initializeDatabase(); err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+
+	log.Info("Successfully connected to database")
+	return nil
+}
+
+// getHTTPClient returns a cached HTTP client or creates a new one
+func (r *OpenstackConfigReconciler) getHTTPClient() *http.Client {
+	r.clientMutex.RLock()
+	if r.HTTPClient != nil {
+		defer r.clientMutex.RUnlock()
+		return r.HTTPClient
+	}
+	r.clientMutex.RUnlock()
+
+	r.clientMutex.Lock()
+	defer r.clientMutex.Unlock()
+
+	// Double-check pattern
+	if r.HTTPClient != nil {
+		return r.HTTPClient
+	}
+
+	r.HTTPClient = createOptimizedHTTPClient()
+	return r.HTTPClient
+}
+
+// createOptimizedHTTPClient creates an HTTP client with optimized settings
+func createOptimizedHTTPClient() *http.Client {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   dialTimeout,
+			KeepAlive: keepAliveTimeout,
+		}).DialContext,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   httpTimeout,
+	}
 }
 
 // handleDeletion handles the deletion of OpenstackConfig CR
@@ -151,70 +327,48 @@ func (r *OpenstackConfigReconciler) handleDeletion(ctx context.Context, openstac
 	log := log.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(openstackConfig, finalizerName) {
-		// Update deleted_at timestamp in multi_subnet, multi_interface, and node_table
+		// Update deleted_at timestamp in multi_interface only
 		deletedAt := openstackConfig.DeletionTimestamp.Time
 
-		// Get subnet information first to find which subnet to mark as deleted
-		subnet, err := r.getSubnetInfo(ctx, openstackConfig)
+		// Begin transaction for deletion
+		tx, err := r.DB.BeginTx(ctx, nil)
 		if err != nil {
-			log.Error(err, "Failed to get subnet info during deletion")
-			// Continue with finalizer removal even if subnet lookup fails
-		} else if subnet != nil {
-			// Begin transaction for deletion
-			tx, err := r.DB.BeginTx(ctx, nil)
-			if err != nil {
-				log.Error(err, "Failed to begin deletion transaction")
-				return ctrl.Result{}, err
-			}
-			defer tx.Rollback()
-
-			// Update multi_subnet table
-			_, err = tx.ExecContext(ctx, `
-				UPDATE multi_subnet 
-				SET deleted_at = ?, status = 'deleted'
-				WHERE id = ?`,
-				deletedAt, subnet.ID)
-			if err != nil {
-				log.Error(err, "Failed to update multi_subnet deleted_at timestamp", "subnet_id", subnet.ID)
-				return ctrl.Result{}, err
-			}
-
-			// Update multi_interface table for all interfaces in this subnet (before node_table due to foreign key)
-			_, err = tx.ExecContext(ctx, `
-				UPDATE multi_interface 
-				SET deleted_at = ?, status = 'deleted'
-				WHERE subnet_id = ?`,
-				deletedAt, subnet.ID)
-			if err != nil {
-				log.Error(err, "Failed to update multi_interface deleted_at timestamp", "subnet_id", subnet.ID)
-				return ctrl.Result{}, err
-			}
-
-			// Update node_table for all nodes associated with interfaces in this subnet
-			_, err = tx.ExecContext(ctx, `
-				UPDATE node_table 
-				SET deleted_at = ?, status = 'deleted'
-				WHERE attached_node_id IN (
-					SELECT DISTINCT attached_node_id 
-					FROM multi_interface 
-					WHERE subnet_id = ? AND attached_node_id IS NOT NULL
-				)`,
-				deletedAt, subnet.ID)
-			if err != nil {
-				log.Error(err, "Failed to update node_table deleted_at timestamp", "subnet_id", subnet.ID)
-				return ctrl.Result{}, err
-			}
-
-			// Commit deletion transaction
-			if err := tx.Commit(); err != nil {
-				log.Error(err, "Failed to commit deletion transaction")
-				return ctrl.Result{}, err
-			}
-
-			log.Info("Successfully marked subnet, interfaces, and nodes as deleted",
-				"subnet_id", subnet.ID,
-				"deleted_at", deletedAt)
+			log.Error(err, "Failed to begin deletion transaction")
+			return ctrl.Result{}, err
 		}
+		defer tx.Rollback()
+
+		// Delete multi_interface records for this CR only
+		// multi_subnet and node_table are master tables and should not be deleted per CR
+		_, err = tx.ExecContext(ctx, `
+			DELETE FROM multi_interface 
+			WHERE cr_namespace = ? AND cr_name = ?`,
+			openstackConfig.Namespace, openstackConfig.Name)
+		if err != nil {
+			log.Error(err, "Failed to delete multi_interface records", "cr_namespace", openstackConfig.Namespace, "cr_name", openstackConfig.Name)
+			return ctrl.Result{}, err
+		}
+
+		// Delete CR state record
+		_, err = tx.ExecContext(ctx, `
+			DELETE FROM cr_state 
+			WHERE cr_namespace = ? AND cr_name = ?`,
+			openstackConfig.Namespace, openstackConfig.Name)
+		if err != nil {
+			log.Error(err, "Failed to delete CR state record", "cr_namespace", openstackConfig.Namespace, "cr_name", openstackConfig.Name)
+			return ctrl.Result{}, err
+		}
+
+		// Commit deletion transaction
+		if err := tx.Commit(); err != nil {
+			log.Error(err, "Failed to commit deletion transaction")
+			return ctrl.Result{}, err
+		}
+
+		log.Info("Successfully deleted CR interface records",
+			"cr_namespace", openstackConfig.Namespace,
+			"cr_name", openstackConfig.Name,
+			"deleted_at", deletedAt)
 
 		// Remove finalizer
 		controllerutil.RemoveFinalizer(openstackConfig, finalizerName)
@@ -230,6 +384,33 @@ func (r *OpenstackConfigReconciler) handleDeletion(ctx context.Context, openstac
 // reconcileNormal handles normal reconciliation logic
 func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, openstackConfig *multinicv1alpha1.OpenstackConfig) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
+
+	// Calculate hash of current CR spec to detect changes
+	currentHash, err := r.calculateCRHash(openstackConfig)
+	if err != nil {
+		log.Error(err, "Failed to calculate CR hash")
+		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+	}
+
+	// Check if CR has actually changed by comparing with stored hash
+	hasChanged, err := r.hasCRChanged(ctx, openstackConfig, currentHash)
+	if err != nil {
+		log.Error(err, "Failed to check CR changes")
+		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+	}
+
+	if !hasChanged {
+		log.Info("CR has not changed, skipping database update",
+			"cr_namespace", openstackConfig.Namespace,
+			"cr_name", openstackConfig.Name,
+			"current_hash", currentHash)
+		return ctrl.Result{RequeueAfter: reconcileInterval}, nil
+	}
+
+	log.Info("CR has changed, proceeding with database update",
+		"cr_namespace", openstackConfig.Namespace,
+		"cr_name", openstackConfig.Name,
+		"current_hash", currentHash)
 
 	// Initialize OpenStack client
 	authURL := normalizeEndpoint(openstackConfig.Spec.Credentials.AuthURL, identityEndpointSuffix)
@@ -271,9 +452,8 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		return ctrl.Result{RequeueAfter: reconcileInterval}, err
 	}
 
-	log.Info("test-computeClient1", "computeClient", computeClient)
-	log.Info("test-computeClient2", "computeClient", computeClient.Endpoint)
-	log.Info("test-computeClient3", "computeClient", computeClient.TokenID, "type", computeClient.Type, "identityEndpoint", opts.IdentityEndpoint, "MoreHeaders", computeClient.MoreHeaders)
+	log.Info("test-computeClient1", "computeClient", computeClient.Endpoint)
+	log.Info("test-computeClient2", "TokenID", computeClient.TokenID, "type", computeClient.Type, "identityEndpoint", opts.IdentityEndpoint, "MoreHeaders", computeClient.MoreHeaders)
 
 	// Get VM information
 	var targetVM *servers.Server
@@ -345,9 +525,27 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 	allServers := serverResponse.Servers
 	log.Info("Successfully extracted servers", "count", len(allServers))
 
-	// 필터링된 결과에서 대상 VM 찾기
-	if len(allServers) == 0 {
-		log.Info("Target VM not found", "name", openstackConfig.Spec.VMName)
+	// 정확한 이름 매칭으로 대상 VM 찾기
+	var foundVM *servers.Server
+	for _, server := range allServers {
+		log.Info("Found server",
+			"name", server.Name,
+			"id", server.ID,
+			"status", server.Status)
+
+		// 정확한 이름 매칭
+		if server.Name == openstackConfig.Spec.VMName {
+			foundVM = &server
+			log.Info("Exact name match found",
+				"target_name", openstackConfig.Spec.VMName,
+				"server_name", server.Name,
+				"server_id", server.ID)
+			break
+		}
+	}
+
+	if foundVM == nil {
+		log.Info("Target VM not found with exact name match", "name", openstackConfig.Spec.VMName)
 		openstackConfig.Status.Status = "Error"
 		openstackConfig.Status.LastUpdated = metav1.Now()
 		openstackConfig.Status.Message = fmt.Sprintf("VM %s not found", openstackConfig.Spec.VMName)
@@ -357,20 +555,11 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		return ctrl.Result{RequeueAfter: reconcileInterval}, nil
 	}
 
-	// 첫 번째 서버를 대상 VM으로 사용 (이름으로 필터링했으므로)
-	targetVM = &allServers[0]
-	log.Info("Found target VM",
+	targetVM = foundVM
+	log.Info("Target VM selected",
 		"name", targetVM.Name,
 		"id", targetVM.ID,
 		"status", targetVM.Status)
-
-	// 서버 목록 로깅 (디버깅용)
-	for _, server := range allServers {
-		log.Info("Found server",
-			"name", server.Name,
-			"id", server.ID,
-			"status", server.Status)
-	}
 
 	// Get subnet information
 	subnet, err := r.getSubnetInfoWithClients(ctx, openstackConfig, networkClient, client)
@@ -398,17 +587,35 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 	}
 	defer tx.Rollback()
 
+	// Clean up existing records for this CR to prevent duplicates
+	log.Info("Cleaning up existing records for CR",
+		"cr_namespace", openstackConfig.Namespace,
+		"cr_name", openstackConfig.Name)
+
+	// Delete existing multi_interface records for this CR
+	// multi_subnet and node_table are master tables and don't need CR-specific cleanup
+	_, err = tx.ExecContext(ctx, `
+		DELETE FROM multi_interface 
+		WHERE cr_namespace = ? AND cr_name = ?`,
+		openstackConfig.Namespace, openstackConfig.Name)
+	if err != nil {
+		log.Error(err, "Failed to delete existing multi_interface records")
+		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+	}
+
+	log.Info("Successfully cleaned up existing records for CR")
+
 	// Insert/Update multi_subnet with CR lifecycle timestamps
 	createdAt := openstackConfig.CreationTimestamp.Time
 	modifiedAt := time.Now()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO multi_subnet (id, subnet_name, cidr, status, created_at, modified_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO multi_subnet (subnet_id, subnet_name, cidr, network_id, status, created_at, modified_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
-		subnet_name=?, cidr=?, status=?, modified_at=?`,
-		subnet.ID, subnet.Name, subnet.CIDR, "active", createdAt, modifiedAt,
-		subnet.Name, subnet.CIDR, "active", modifiedAt,
+		subnet_name=?, cidr=?, network_id=?, status=?, modified_at=?`,
+		subnet.ID, subnet.Name, subnet.CIDR, subnet.NetworkID, "active", createdAt, modifiedAt,
+		subnet.Name, subnet.CIDR, subnet.NetworkID, "active", modifiedAt,
 	)
 	if err != nil {
 		log.Error(err, "Failed to insert subnet information")
@@ -419,6 +626,7 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		"subnet_id", subnet.ID,
 		"subnet_name", subnet.Name,
 		"cidr", subnet.CIDR,
+		"network_id", subnet.NetworkID,
 		"created_at", createdAt,
 		"modified_at", modifiedAt)
 
@@ -427,9 +635,8 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		INSERT INTO node_table (attached_node_id, attached_node_name, status, created_at, modified_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
-		attached_node_name=?, status=?, modified_at=?`,
+		attached_node_name=VALUES(attached_node_name), status=VALUES(status), modified_at=VALUES(modified_at)`,
 		targetVM.ID, targetVM.Name, "active", createdAt, modifiedAt,
-		targetVM.Name, "active", modifiedAt,
 	)
 	if err != nil {
 		log.Error(err, "Failed to insert node information")
@@ -493,12 +700,12 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 
 				// Insert into multi_interface
 				_, err = tx.ExecContext(ctx, `
-					INSERT INTO multi_interface (id, subnet_id, macaddress, attached_node_id, status, created_at, modified_at)
-					VALUES (?, ?, ?, ?, ?, ?, ?)
+					INSERT INTO multi_interface (port_id, subnet_id, macaddress, attached_node_id, attached_node_name, cr_namespace, cr_name, status, netplan_success, created_at, modified_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 					ON DUPLICATE KEY UPDATE
-					macaddress=?, attached_node_id=?, status=?, modified_at=?`,
-					portID, subnet.ID, macAddr, targetVM.ID, "active", createdAt, modifiedAt,
-					macAddr, targetVM.ID, "active", modifiedAt,
+					macaddress=?, attached_node_id=?, attached_node_name=?, status=?, netplan_success=?, modified_at=?`,
+					portID, subnet.ID, macAddr, targetVM.ID, targetVM.Name, openstackConfig.Namespace, openstackConfig.Name, "active", 0, createdAt, modifiedAt,
+					macAddr, targetVM.ID, targetVM.Name, "active", 0, modifiedAt,
 				)
 				if err != nil {
 					log.Error(err, "Failed to insert interface information")
@@ -591,7 +798,7 @@ func (r *OpenstackConfigReconciler) getSubnetInfo(ctx context.Context, openstack
 func (r *OpenstackConfigReconciler) getSubnetInfoWithClients(ctx context.Context, openstackConfig *multinicv1alpha1.OpenstackConfig, networkClient *gophercloud.ServiceClient, client *http.Client) (*subnets.Subnet, error) {
 	log := log.FromContext(ctx)
 
-	for i := 0; i < maxRetries; i++ {
+	for i := 0; i < openstackMaxRetries; i++ {
 		log.Info("Searching for network and subnet", "subnet_name", openstackConfig.Spec.SubnetName)
 
 		// 직접 HTTP 요청으로 네트워크 목록을 가져옵니다
@@ -709,7 +916,7 @@ func (r *OpenstackConfigReconciler) getSubnetInfoWithClients(ctx context.Context
 		time.Sleep(time.Second * time.Duration(i+1))
 	}
 
-	return nil, fmt.Errorf("subnet %s not found after %d attempts", openstackConfig.Spec.SubnetName, maxRetries)
+	return nil, fmt.Errorf("subnet %s not found after %d attempts", openstackConfig.Spec.SubnetName, openstackMaxRetries)
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -720,45 +927,17 @@ func (r *OpenstackConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// ensureDBConnection ensures that the database connection is active
-func (r *OpenstackConfigReconciler) ensureDBConnection(ctx context.Context) error {
-	if r.DB == nil || r.DB.PingContext(ctx) != nil {
-		dsn := r.buildDSN()
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			return fmt.Errorf("failed to connect to MariaDB: %v", err)
-		}
-
-		// Configure connection pool with optimized settings
-		db.SetMaxOpenConns(5)                   // 연결 수 줄임 (기존: 10)
-		db.SetMaxIdleConns(2)                   // 유휴 연결 수 줄임 (기존: 5)
-		db.SetConnMaxLifetime(10 * time.Minute) // 연결 수명 단축 (기존: 1시간)
-		db.SetConnMaxIdleTime(5 * time.Minute)  // 유휴 연결 타임아웃 추가
-
-		r.DB = db
-
-		// Test connection
-		if err := r.DB.PingContext(ctx); err != nil {
-			return fmt.Errorf("failed to ping MariaDB: %v", err)
-		}
-
-		// Initialize database tables
-		if err := r.initializeDatabase(); err != nil {
-			return fmt.Errorf("failed to initialize database: %v", err)
-		}
-	}
-	return nil
-}
-
 // initializeDatabase creates/updates database tables
 func (r *OpenstackConfigReconciler) initializeDatabase() error {
-	// Create/Update tables
+	// Create tables with proper schema
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS multi_subnet (
-			id VARCHAR(36) PRIMARY KEY,
+			id INT AUTO_INCREMENT PRIMARY KEY,
+			subnet_id VARCHAR(36) NOT NULL UNIQUE,
 			subnet_name VARCHAR(255) NOT NULL,
 			cidr VARCHAR(255) NOT NULL,
-			status VARCHAR(50) DEFAULT 'created',
+			network_id VARCHAR(36) NOT NULL COMMENT 'OpenStack network ID',
+			status VARCHAR(50) DEFAULT 'active',
 			created_at TIMESTAMP NULL,
 			modified_at TIMESTAMP NULL,
 			deleted_at TIMESTAMP NULL
@@ -766,59 +945,44 @@ func (r *OpenstackConfigReconciler) initializeDatabase() error {
 		`CREATE TABLE IF NOT EXISTS node_table (
 			id INT AUTO_INCREMENT PRIMARY KEY,
 			attached_node_id VARCHAR(36) NOT NULL UNIQUE,
-			attached_node_name VARCHAR(255) NOT NULL,
-			status VARCHAR(50) DEFAULT 'created',
+			attached_node_name VARCHAR(255) NOT NULL UNIQUE,
+			status VARCHAR(50) DEFAULT 'active',
 			created_at TIMESTAMP NULL,
 			modified_at TIMESTAMP NULL,
 			deleted_at TIMESTAMP NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS multi_interface (
-			id VARCHAR(36) PRIMARY KEY,
+			id INT AUTO_INCREMENT PRIMARY KEY,
+			port_id VARCHAR(36) NOT NULL UNIQUE,
 			subnet_id VARCHAR(36) NOT NULL,
 			macaddress VARCHAR(17) NOT NULL,
 			attached_node_id VARCHAR(36),
-			status VARCHAR(50) DEFAULT 'created',
+			attached_node_name VARCHAR(255) NULL,
+			cr_namespace VARCHAR(255) NOT NULL COMMENT 'OpenstackConfig CR namespace',
+			cr_name VARCHAR(255) NOT NULL COMMENT 'OpenstackConfig CR name',
+			status VARCHAR(50) DEFAULT 'active',
+			netplan_success TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Netplan apply success (0: fail/not applied, 1: success)',
 			created_at TIMESTAMP NULL,
 			modified_at TIMESTAMP NULL,
 			deleted_at TIMESTAMP NULL,
-			FOREIGN KEY (subnet_id) REFERENCES multi_subnet(id),
-			FOREIGN KEY (attached_node_id) REFERENCES node_table(attached_node_id)
+			FOREIGN KEY (subnet_id) REFERENCES multi_subnet(subnet_id),
+			FOREIGN KEY (attached_node_id) REFERENCES node_table(attached_node_id),
+			FOREIGN KEY (attached_node_name) REFERENCES node_table(attached_node_name),
+			UNIQUE KEY unique_cr_interface (cr_namespace, cr_name, port_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS cr_state (
+			id INT AUTO_INCREMENT PRIMARY KEY,
+			cr_namespace VARCHAR(255) NOT NULL,
+			cr_name VARCHAR(255) NOT NULL,
+			spec_hash VARCHAR(64) NOT NULL COMMENT 'SHA256 hash of CR spec',
+			last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			UNIQUE KEY unique_cr (cr_namespace, cr_name)
 		)`,
 	}
 
 	for _, query := range queries {
 		if _, err := r.DB.Exec(query); err != nil {
 			return fmt.Errorf("failed to create table: %v", err)
-		}
-	}
-
-	// Add/Modify columns for existing tables
-	alterQueries := []string{
-		// multi_subnet 테이블 수정
-		`ALTER TABLE multi_subnet MODIFY COLUMN created_at TIMESTAMP NULL`,
-		`ALTER TABLE multi_subnet MODIFY COLUMN modified_at TIMESTAMP NULL`,
-		`ALTER TABLE multi_subnet ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL`,
-		`ALTER TABLE multi_subnet DROP COLUMN IF EXISTS cr_created_at`,
-		`ALTER TABLE multi_subnet DROP COLUMN IF EXISTS cr_modified_at`,
-		`ALTER TABLE multi_subnet DROP COLUMN IF EXISTS cr_deleted_at`,
-
-		// multi_interface 테이블 수정
-		`ALTER TABLE multi_interface MODIFY COLUMN created_at TIMESTAMP NULL`,
-		`ALTER TABLE multi_interface MODIFY COLUMN modified_at TIMESTAMP NULL`,
-		`ALTER TABLE multi_interface ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL`,
-		`ALTER TABLE multi_interface ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'created'`,
-
-		// node_table 테이블 수정
-		`ALTER TABLE node_table MODIFY COLUMN created_at TIMESTAMP NULL`,
-		`ALTER TABLE node_table MODIFY COLUMN modified_at TIMESTAMP NULL`,
-		`ALTER TABLE node_table ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL`,
-		`ALTER TABLE node_table ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'created'`,
-	}
-
-	for _, query := range alterQueries {
-		if _, err := r.DB.Exec(query); err != nil {
-			// Log error but don't fail - some MySQL versions don't support IF NOT EXISTS
-			fmt.Printf("Warning: Failed to execute alter query: %v\n", err)
 		}
 	}
 
@@ -844,7 +1008,7 @@ func createOpenStackClient(ctx context.Context, opts gophercloud.AuthOptions, en
 		"domainName", opts.DomainName,
 		"scope", opts.Scope)
 
-	for i := 0; i < maxRetries; i++ {
+	for i := 0; i < openstackMaxRetries; i++ {
 		log.Info("Attempting to create provider client", "attempt", i+1)
 
 		// gophercloud provider 옵션 설정
@@ -927,7 +1091,7 @@ func createOpenStackClient(ctx context.Context, opts gophercloud.AuthOptions, en
 		return client, nil
 	}
 
-	return nil, fmt.Errorf("failed to create OpenStack client after %d attempts", maxRetries)
+	return nil, fmt.Errorf("failed to create OpenStack client after %d attempts", openstackMaxRetries)
 }
 
 // 맵의 키들을 가져오는 헬퍼 함수
@@ -948,7 +1112,7 @@ func (r *OpenstackConfigReconciler) getDatabaseConfig() *DatabaseConfig {
 	r.DBConfig = &DatabaseConfig{
 		Host:     getEnvOrDefault("DB_HOST", defaultDBHost),
 		Port:     getEnvOrDefault("DB_PORT", defaultDBPort),
-		User:     getEnvOrDefault("DB_USER", defaultDBUser),
+		User:     getEnvOrDefault("DB_USER", defaultDBUserName),
 		Password: getEnvOrDefault("DB_PASSWORD", defaultDBPassword),
 		DBName:   getEnvOrDefault("DB_NAME", defaultDBName),
 	}
@@ -1117,4 +1281,101 @@ func (r *OpenstackConfigReconciler) findPortByMACAddress(ctx context.Context, op
 
 	log.Info("No ports found in target subnet for MAC address", "mac_addr", macAddr, "target_subnet_id", targetSubnetID)
 	return "", nil
+}
+
+// calculateCRHash calculates a hash of the current CR spec
+func (r *OpenstackConfigReconciler) calculateCRHash(openstackConfig *multinicv1alpha1.OpenstackConfig) (string, error) {
+	// Create a structure that contains only the fields that matter for reconciliation
+	specData := struct {
+		AuthURL         string `json:"auth_url"`
+		Username        string `json:"username"`
+		Password        string `json:"password"`
+		ProjectID       string `json:"project_id"`
+		DomainName      string `json:"domain_name"`
+		NetworkEndpoint string `json:"network_endpoint"`
+		ComputeEndpoint string `json:"compute_endpoint"`
+		VMName          string `json:"vm_name"`
+		SubnetName      string `json:"subnet_name"`
+	}{
+		AuthURL:         openstackConfig.Spec.Credentials.AuthURL,
+		Username:        openstackConfig.Spec.Credentials.Username,
+		Password:        openstackConfig.Spec.Credentials.Password,
+		ProjectID:       openstackConfig.Spec.Credentials.ProjectID,
+		DomainName:      openstackConfig.Spec.Credentials.DomainName,
+		NetworkEndpoint: openstackConfig.Spec.Credentials.NetworkEndpoint,
+		ComputeEndpoint: openstackConfig.Spec.Credentials.ComputeEndpoint,
+		VMName:          openstackConfig.Spec.VMName,
+		SubnetName:      openstackConfig.Spec.SubnetName,
+	}
+
+	// Convert to JSON and calculate SHA256 hash
+	jsonData, err := json.Marshal(specData)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal spec data: %v", err)
+	}
+
+	hash := sha256.Sum256(jsonData)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+// hasCRChanged checks if the CR has actually changed
+func (r *OpenstackConfigReconciler) hasCRChanged(ctx context.Context, openstackConfig *multinicv1alpha1.OpenstackConfig, currentHash string) (bool, error) {
+	log := log.FromContext(ctx)
+
+	// Query the database to get the last known hash for this CR
+	var storedHash string
+	err := r.DB.QueryRowContext(ctx, `
+		SELECT spec_hash FROM cr_state 
+		WHERE cr_namespace = ? AND cr_name = ?`,
+		openstackConfig.Namespace, openstackConfig.Name).Scan(&storedHash)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// No previous state found, this is a new or first-time CR
+			// Store the hash for future comparisons
+			_, insertErr := r.DB.ExecContext(ctx, `
+				INSERT INTO cr_state (cr_namespace, cr_name, spec_hash, last_updated)
+				VALUES (?, ?, ?, NOW())`,
+				openstackConfig.Namespace, openstackConfig.Name, currentHash)
+			if insertErr != nil {
+				log.Error(insertErr, "Failed to store initial CR state")
+				return false, fmt.Errorf("failed to store initial CR state: %v", insertErr)
+			}
+			log.Info("Stored initial CR state",
+				"cr_namespace", openstackConfig.Namespace,
+				"cr_name", openstackConfig.Name,
+				"hash", currentHash)
+			return true, nil
+		}
+		return false, fmt.Errorf("failed to query CR state: %v", err)
+	}
+
+	// Compare hashes
+	hasChanged := storedHash != currentHash
+
+	log.Info("CR change comparison",
+		"cr_namespace", openstackConfig.Namespace,
+		"cr_name", openstackConfig.Name,
+		"stored_hash", storedHash,
+		"current_hash", currentHash,
+		"has_changed", hasChanged)
+
+	// Update the stored hash if it has changed
+	if hasChanged {
+		_, err = r.DB.ExecContext(ctx, `
+			UPDATE cr_state 
+			SET spec_hash = ?, last_updated = NOW()
+			WHERE cr_namespace = ? AND cr_name = ?`,
+			currentHash, openstackConfig.Namespace, openstackConfig.Name)
+		if err != nil {
+			log.Error(err, "Failed to update CR state")
+			return false, fmt.Errorf("failed to update CR state: %v", err)
+		}
+		log.Info("Updated CR state",
+			"cr_namespace", openstackConfig.Namespace,
+			"cr_name", openstackConfig.Name,
+			"new_hash", currentHash)
+	}
+
+	return hasChanged, nil
 }

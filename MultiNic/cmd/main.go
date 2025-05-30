@@ -78,23 +78,28 @@ func main() {
 		})
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
-		Metrics: metricsserver.Options{
-			BindAddress: metricsAddr,
-		},
-		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "cd5ae1b8.example.com",
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to start manager")
-		os.Exit(1)
-	}
+	var mgr ctrl.Manager
+	var err error
 
 	// Register controllers based on mode
 	if os.Getenv("CONTROLLER_MODE") == "" {
-		// Operator mode: only register MultiNicOperator controller
+		// Operator mode: register MultiNicOperator controller without leader election
+		setupLog.Info("Running in operator mode - managing MultiNicOperator resources")
+
+		// Operator는 리더 선출이 필요없음 (단일 인스턴스로 실행)
+		mgr, err = ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+			Scheme: scheme,
+			Metrics: metricsserver.Options{
+				BindAddress: metricsAddr,
+			},
+			HealthProbeBindAddress: probeAddr,
+			LeaderElection:         false, // Operator는 리더 선출 비활성화
+		})
+		if err != nil {
+			setupLog.Error(err, "unable to start operator manager")
+			os.Exit(1)
+		}
+
 		if err = (&controllers.MultiNicOperatorReconciler{
 			Client: mgr.GetClient(),
 			Scheme: mgr.GetScheme(),
@@ -103,8 +108,24 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		// Controller mode: register OpenstackConfig controller
-		setupLog.Info("Running in controller mode - registering OpenstackConfig reconciler")
+		// Controller mode: register OpenstackConfig controller with leader election
+		setupLog.Info("Running in controller mode - processing OpenstackConfig resources")
+
+		// Controller는 리더 선출 필요 (고가용성)
+		mgr, err = ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+			Scheme: scheme,
+			Metrics: metricsserver.Options{
+				BindAddress: metricsAddr,
+			},
+			HealthProbeBindAddress: probeAddr,
+			LeaderElection:         enableLeaderElection,
+			LeaderElectionID:       "multinic-controller.example.com", // 다른 ID 사용
+		})
+		if err != nil {
+			setupLog.Error(err, "unable to start controller manager")
+			os.Exit(1)
+		}
+
 		if err = (&controllers.OpenstackConfigReconciler{
 			Client: mgr.GetClient(),
 			Scheme: mgr.GetScheme(),

@@ -124,6 +124,22 @@ spec:
                         description: Memory requests and limits
                         type: string
                     type: object
+                  service:
+                    description: Service configuration
+                    properties:
+                      nodePort:
+                        description: NodePort for external access (only used when
+                          type is NodePort)
+                        format: int32
+                        type: integer
+                      port:
+                        description: Port for the database service
+                        format: int32
+                        type: integer
+                      type:
+                        description: Service type (ClusterIP, NodePort, LoadBalancer)
+                        type: string
+                    type: object
                   storageSize:
                     description: Storage size
                     type: string
@@ -271,6 +287,10 @@ spec:
               message:
                 description: Status message
                 type: string
+              observedGeneration:
+                description: Observed generation of the operator spec
+                format: int64
+                type: integer
               phase:
                 description: Overall status
                 type: string

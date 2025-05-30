@@ -35,12 +35,31 @@ var (
 		[]string{"status"},
 	)
 
+	// OperatorReconcileDuration measures the duration of operator reconcile operations
+	OperatorReconcileDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "multinic_operator_reconcile_duration_seconds",
+			Help:    "Duration of operator reconcile operations in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"operator"},
+	)
+
 	// ActiveConnections tracks the number of active database connections
 	ActiveConnections = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "multinic_active_db_connections",
 			Help: "Number of active database connections",
 		},
+	)
+
+	// ComponentStatusMetric tracks the status of MultiNic components
+	ComponentStatusMetric = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "multinic_component_status",
+			Help: "Status of MultiNic components (1=ready, 0=not ready)",
+		},
+		[]string{"component", "namespace", "operator"},
 	)
 )
 
@@ -50,6 +69,8 @@ func init() {
 		OpenstackRequestDuration,
 		DatabaseOperationDuration,
 		ReconcileTotal,
+		OperatorReconcileDuration,
 		ActiveConnections,
+		ComponentStatusMetric,
 	)
 }
