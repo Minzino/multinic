@@ -66,6 +66,9 @@ type DatabaseConfig struct {
 
 	// Database credentials
 	Credentials DBCredentials `json:"credentials,omitempty"`
+
+	// Service configuration
+	Service ServiceConfig `json:"service,omitempty"`
 }
 
 // OpenStackConfig defines OpenStack endpoints
@@ -125,6 +128,18 @@ type DBCredentials struct {
 	Password string `json:"password,omitempty"`
 }
 
+// ServiceConfig defines service exposure settings
+type ServiceConfig struct {
+	// Service type (ClusterIP, NodePort, LoadBalancer)
+	Type string `json:"type,omitempty"`
+
+	// NodePort for external access (only used when type is NodePort)
+	NodePort int32 `json:"nodePort,omitempty"`
+
+	// Port for the database service
+	Port int32 `json:"port,omitempty"`
+}
+
 // MultiNicOperatorStatus defines the observed state of MultiNicOperator
 type MultiNicOperatorStatus struct {
 	// Overall status
@@ -135,6 +150,9 @@ type MultiNicOperatorStatus struct {
 
 	// Last update time
 	LastUpdated metav1.Time `json:"lastUpdated,omitempty"`
+
+	// Observed generation of the operator spec
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Controller status
 	ControllerStatus ComponentStatus `json:"controllerStatus,omitempty"`

@@ -14,8 +14,3 @@ resources:
 
 patchesStrategicMerge:
 - operator-manager-patch.yaml
-
-images:
-- name: controller
-  newName: multinic-operator
-  newTag: v1alpha1 
