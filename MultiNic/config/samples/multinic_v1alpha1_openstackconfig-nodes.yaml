@@ -12,4 +12,5 @@ spec:
     networkEndpoint: "https://121.141.64.224:19696"
     computeEndpoint: "https://121.141.64.224:18774"
   subnetName: "k8s-subnet"
-  vmName: "tg-cluster-2"
+  vmNames: 
+    - "tg-cluster-2"

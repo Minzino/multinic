@@ -33,6 +33,9 @@ type MultiNicOperatorSpec struct {
 
 	// Protection settings
 	Protection ProtectionConfig `json:"protection,omitempty"`
+
+	// Reconcile trigger configuration
+	ReconcileTrigger ReconcileTriggerConfig `json:"reconcileTrigger,omitempty"`
 }
 
 // ControllerConfig defines controller settings
@@ -138,6 +141,29 @@ type ServiceConfig struct {
 
 	// Port for the database service
 	Port int32 `json:"port,omitempty"`
+}
+
+// ReconcileTriggerConfig defines when OpenStack reconcile should be triggered
+type ReconcileTriggerConfig struct {
+	// Mode defines the reconcile trigger mode
+	// - "immediate": Always reconcile immediately (default)
+	// - "scheduled": Only reconcile at scheduled intervals
+	// - "manual": Only reconcile when manually triggered
+	// - "webhook": Reconcile when triggered by webhook
+	Mode string `json:"mode,omitempty"`
+
+	// Schedule for scheduled mode (cron format)
+	Schedule string `json:"schedule,omitempty"`
+
+	// Interval for scheduled mode (e.g., "5m", "1h")
+	Interval string `json:"interval,omitempty"`
+
+	// Enable immediate reconcile on OpenstackConfig CR changes
+	// This overrides the mode setting for CR events
+	ImmediateOnCRChange bool `json:"immediateOnCRChange,omitempty"`
+
+	// Timezone for scheduled reconcile
+	Timezone string `json:"timezone,omitempty"`
 }
 
 // MultiNicOperatorStatus defines the observed state of MultiNicOperator

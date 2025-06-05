@@ -76,13 +76,15 @@ spec:
               subnetName:
                 description: SubnetName is the name of the OpenStack subnet
                 type: string
-              vmName:
-                description: VMName is the name of the OpenStack VM
-                type: string
+              vmNames:
+                description: VMNames is a list of OpenStack VM names to monitor
+                items:
+                  type: string
+                type: array
             required:
             - credentials
             - subnetName
-            - vmName
+            - vmNames
             type: object
           status:
             description: OpenstackConfigStatus defines the observed state of OpenstackConfig.
@@ -95,27 +97,43 @@ spec:
                 description: Message provides additional information about the current
                   status
                 type: string
-              networkInfo:
-                description: NetworkInfo contains the network information retrieved
-                  from OpenStack
-                properties:
-                  ipAddress:
-                    description: IPAddress is the IP address assigned to the VM
-                    type: string
-                  macAddress:
-                    description: MACAddress is the MAC address of the VM's network
-                      interface
-                    type: string
-                  networkID:
-                    description: NetworkID is the ID of the OpenStack network
-                    type: string
-                  subnetID:
-                    description: SubnetID is the ID of the OpenStack subnet
-                    type: string
-                type: object
               status:
                 description: Status represents the current status of the OpenstackConfig
                 type: string
+              vmNetworkInfos:
+                description: VMNetworkInfos contains the network information for each
+                  VM retrieved from OpenStack
+                items:
+                  description: VMNetworkInfo contains the network information for
+                    a specific VM from OpenStack
+                  properties:
+                    ipAddress:
+                      description: IPAddress is the IP address assigned to the VM
+                      type: string
+                    macAddress:
+                      description: MACAddress is the MAC address of the VM's network
+                        interface
+                      type: string
+                    message:
+                      description: Message provides additional information about this
+                        VM's status
+                      type: string
+                    networkID:
+                      description: NetworkID is the ID of the OpenStack network
+                      type: string
+                    status:
+                      description: Status represents the status of this specific VM
+                      type: string
+                    subnetID:
+                      description: SubnetID is the ID of the OpenStack subnet
+                      type: string
+                    vmName:
+                      description: VMName is the name of the VM
+                      type: string
+                  required:
+                  - vmName
+                  type: object
+                type: array
             type: object
         type: object
     served: true

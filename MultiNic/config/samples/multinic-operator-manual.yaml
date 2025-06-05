@@ -1,7 +1,7 @@
 apiVersion: multinic.example.com/v1alpha1
 kind: MultiNicOperator
 metadata:
-  name: multinic-operator-sample
+  name: multinic-operator-manual
   namespace: multinic-system
 spec:
   controller:
@@ -36,5 +36,5 @@ spec:
     - "watch"
   
   reconcileTrigger:
-    mode: "immediate"
-    immediateOnCRChange: true 
+    mode: "manual"
+    immediateOnCRChange: true  # Only reconcile when OpenstackConfig CR changes 

@@ -14,6 +14,12 @@ spec:
       port: 8082
       path: "/healthz"
   
+  #mode: immediate, scheduled, manual
+  reconcileTrigger:
+    mode: "scheduled"
+    interval: "1m"
+    immediateOnCRChange: true
+
   database:
     enabled: true
     image: mariadb:10.11

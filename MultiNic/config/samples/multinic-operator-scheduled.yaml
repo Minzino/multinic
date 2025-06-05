@@ -1,7 +1,7 @@
 apiVersion: multinic.example.com/v1alpha1
 kind: MultiNicOperator
 metadata:
-  name: multinic-operator-sample
+  name: multinic-operator-scheduled
   namespace: multinic-system
 spec:
   controller:
@@ -36,5 +36,7 @@ spec:
     - "watch"
   
   reconcileTrigger:
-    mode: "immediate"
-    immediateOnCRChange: true 
+    mode: "scheduled"
+    interval: "3m"  # Reconcile every 3 minutes
+    immediateOnCRChange: true  # But still respond immediately to CR changes
+    timezone: "UTC" 

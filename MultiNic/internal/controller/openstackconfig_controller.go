@@ -42,7 +42,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	multinicv1alpha1 "github.com/xormsdhkdwk/multinic/api/v1alpha1"
@@ -385,6 +387,8 @@ func (r *OpenstackConfigReconciler) handleDeletion(ctx context.Context, openstac
 func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, openstackConfig *multinicv1alpha1.OpenstackConfig) (ctrl.Result, error) {
 	log := log.FromContext(ctx)
 
+	log.Info("=== RECONCILE NORMAL FUNCTION STARTED ===", "cr_name", openstackConfig.Name, "cr_namespace", openstackConfig.Namespace)
+
 	// Calculate hash of current CR spec to detect changes
 	currentHash, err := r.calculateCRHash(openstackConfig)
 	if err != nil {
@@ -399,18 +403,56 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		return ctrl.Result{RequeueAfter: reconcileInterval}, err
 	}
 
-	if !hasChanged {
-		log.Info("CR has not changed, skipping database update",
-			"cr_namespace", openstackConfig.Namespace,
-			"cr_name", openstackConfig.Name,
-			"current_hash", currentHash)
-		return ctrl.Result{RequeueAfter: reconcileInterval}, nil
+	// Get MultiNicOperator trigger configuration
+	triggerConfig, err := r.getReconcileTriggerConfig(ctx, openstackConfig.Namespace)
+	if err != nil {
+		log.Error(err, "Failed to get reconcile trigger configuration, using default")
+		// Use default behavior if we can't get the config
+		triggerConfig = &multinicv1alpha1.ReconcileTriggerConfig{
+			Mode:                "manual",
+			ImmediateOnCRChange: true,
+		}
 	}
 
-	log.Info("CR has changed, proceeding with database update",
+	log.Info("Trigger configuration retrieved",
+		"mode", triggerConfig.Mode,
+		"interval", triggerConfig.Interval,
+		"immediateOnCRChange", triggerConfig.ImmediateOnCRChange,
+		"crHasChanged", hasChanged)
+
+	// Check if we should proceed with reconcile based on trigger configuration
+	shouldReconcile, requeueAfter := r.shouldReconcile(ctx, triggerConfig, hasChanged)
+	if !shouldReconcile {
+		log.Info("Reconcile skipped due to trigger configuration",
+			"mode", triggerConfig.Mode,
+			"crHasChanged", hasChanged,
+			"requeueAfter", requeueAfter)
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	}
+
+	log.Info("Proceeding with reconcile",
+		"mode", triggerConfig.Mode,
+		"crHasChanged", hasChanged,
+		"reason", func() string {
+			if hasChanged && triggerConfig.ImmediateOnCRChange {
+				return "CR changed"
+			}
+			switch triggerConfig.Mode {
+			case "immediate":
+				return "immediate mode"
+			case "scheduled":
+				return "scheduled interval"
+			default:
+				return "default behavior"
+			}
+		}())
+
+	// Only proceed with OpenStack API calls if we should reconcile
+	log.Info("CR has changed or scheduled reconcile triggered, proceeding with OpenStack API calls",
 		"cr_namespace", openstackConfig.Namespace,
 		"cr_name", openstackConfig.Name,
-		"current_hash", currentHash)
+		"current_hash", currentHash,
+		"crHasChanged", hasChanged)
 
 	// Initialize OpenStack client
 	authURL := normalizeEndpoint(openstackConfig.Spec.Credentials.AuthURL, identityEndpointSuffix)
@@ -428,7 +470,7 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		},
 	}
 
-	log.Info("test-opts", "IdentityEndpoint", opts.IdentityEndpoint)
+	log.Info("Creating OpenStack clients", "mode", triggerConfig.Mode)
 
 	// Create network client
 	networkEndpoint := normalizeEndpoint(openstackConfig.Spec.Credentials.NetworkEndpoint, networkEndpointSuffix)
@@ -441,7 +483,9 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		if updateErr := r.Client.Status().Update(ctx, openstackConfig); updateErr != nil {
 			log.Error(updateErr, "Failed to update status")
 		}
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		// Return with appropriate requeue interval based on trigger config
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 
 	// Create compute client
@@ -449,15 +493,17 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 	computeClient, err := createOpenStackClient(ctx, opts, computeEndpoint, "compute")
 	if err != nil {
 		log.Error(err, "Failed to create compute client")
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 
-	log.Info("test-computeClient1", "computeClient", computeClient.Endpoint)
-	log.Info("test-computeClient2", "TokenID", computeClient.TokenID, "type", computeClient.Type, "identityEndpoint", opts.IdentityEndpoint, "MoreHeaders", computeClient.MoreHeaders)
+	log.Info("OpenStack clients created successfully",
+		"networkEndpoint", networkClient.Endpoint,
+		"computeEndpoint", computeClient.Endpoint,
+		"mode", triggerConfig.Mode)
 
 	// Get VM information
-	var targetVM *servers.Server
-	log.Info("Starting VM search process", "target_vm", openstackConfig.Spec.VMName)
+	log.Info("Starting VM search process", "target_vms", openstackConfig.Spec.VMNames)
 
 	if computeClient == nil {
 		log.Error(nil, "Compute client is nil")
@@ -467,7 +513,8 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		if err := r.Client.Status().Update(ctx, openstackConfig); err != nil {
 			log.Error(err, "Failed to update status")
 		}
-		return ctrl.Result{RequeueAfter: reconcileInterval}, fmt.Errorf("compute client is nil")
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, fmt.Errorf("compute client is nil")
 	}
 
 	log.Info("Starting server list request with options",
@@ -476,9 +523,9 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		"tokenID", computeClient.TokenID != "",
 		"serviceType", computeClient.Type)
 
-	// 실제 요청 URL 구성 확인 - 특정 서버 이름으로 필터링
-	requestURL := computeClient.Endpoint + "/servers/detail?name=" + openstackConfig.Spec.VMName
-	log.Info("Actual request URL that will be used", "url", requestURL, "target_vm", openstackConfig.Spec.VMName)
+	// Get all servers - we'll filter them locally
+	requestURL := computeClient.Endpoint + "/servers/detail"
+	log.Info("Actual request URL that will be used", "url", requestURL, "target_vms", openstackConfig.Spec.VMNames)
 
 	// 직접 HTTP 요청으로 서버 목록 조회
 	client := &http.Client{
@@ -490,7 +537,8 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 	httpReq, err := http.NewRequest("GET", requestURL, nil)
 	if err != nil {
 		log.Error(err, "Failed to create HTTP request")
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 
 	httpReq.Header.Set("X-Auth-Token", computeClient.TokenID)
@@ -499,14 +547,16 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		log.Error(err, "Failed to execute HTTP request")
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Error(err, "Failed to read response body")
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 
 	log.Info("HTTP response received", "status", resp.Status, "bodyLength", len(body))
@@ -519,53 +569,47 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 	err = json.Unmarshal(body, &serverResponse)
 	if err != nil {
 		log.Error(err, "Failed to unmarshal server response", "body", string(body))
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 
 	allServers := serverResponse.Servers
 	log.Info("Successfully extracted servers", "count", len(allServers))
 
-	// 정확한 이름 매칭으로 대상 VM 찾기
-	var foundVM *servers.Server
-	for _, server := range allServers {
-		log.Info("Found server",
-			"name", server.Name,
-			"id", server.ID,
-			"status", server.Status)
+	// Find target VMs by matching names (single pass)
+	var targetVMs []servers.Server
+	vmNameSet := make(map[string]bool)
+	for _, vmName := range openstackConfig.Spec.VMNames {
+		vmNameSet[vmName] = true
+	}
 
-		// 정확한 이름 매칭
-		if server.Name == openstackConfig.Spec.VMName {
-			foundVM = &server
-			log.Info("Exact name match found",
-				"target_name", openstackConfig.Spec.VMName,
-				"server_name", server.Name,
-				"server_id", server.ID)
-			break
+	for _, server := range allServers {
+		if vmNameSet[server.Name] {
+			targetVMs = append(targetVMs, server)
+			log.Info("Target VM found", "server_name", server.Name, "server_id", server.ID)
 		}
 	}
 
-	if foundVM == nil {
-		log.Info("Target VM not found with exact name match", "name", openstackConfig.Spec.VMName)
+	if len(targetVMs) == 0 {
+		log.Info("No target VMs found", "requested_vms", openstackConfig.Spec.VMNames)
 		openstackConfig.Status.Status = "Error"
 		openstackConfig.Status.LastUpdated = metav1.Now()
-		openstackConfig.Status.Message = fmt.Sprintf("VM %s not found", openstackConfig.Spec.VMName)
+		openstackConfig.Status.Message = fmt.Sprintf("None of the requested VMs found: %v", openstackConfig.Spec.VMNames)
 		if err := r.Client.Status().Update(ctx, openstackConfig); err != nil {
 			log.Error(err, "Failed to update status")
 		}
-		return ctrl.Result{RequeueAfter: reconcileInterval}, nil
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, nil
 	}
 
-	targetVM = foundVM
-	log.Info("Target VM selected",
-		"name", targetVM.Name,
-		"id", targetVM.ID,
-		"status", targetVM.Status)
+	log.Info("Target VMs selected", "count", len(targetVMs), "vm_names", openstackConfig.Spec.VMNames)
 
 	// Get subnet information
 	subnet, err := r.getSubnetInfoWithClients(ctx, openstackConfig, networkClient, client)
 	if err != nil {
 		log.Error(err, "Failed to get subnet information")
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 
 	if subnet == nil {
@@ -576,14 +620,16 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		if err := r.Client.Status().Update(ctx, openstackConfig); err != nil {
 			log.Error(err, "Failed to update status")
 		}
-		return ctrl.Result{RequeueAfter: reconcileInterval}, nil
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, nil
 	}
 
 	// Begin transaction
 	tx, err := r.DB.BeginTx(ctx, nil)
 	if err != nil {
 		log.Error(err, "Failed to begin transaction")
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 	defer tx.Rollback()
 
@@ -592,20 +638,19 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 		"cr_namespace", openstackConfig.Namespace,
 		"cr_name", openstackConfig.Name)
 
-	// Delete existing multi_interface records for this CR
-	// multi_subnet and node_table are master tables and don't need CR-specific cleanup
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM multi_interface 
 		WHERE cr_namespace = ? AND cr_name = ?`,
 		openstackConfig.Namespace, openstackConfig.Name)
 	if err != nil {
 		log.Error(err, "Failed to delete existing multi_interface records")
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 
 	log.Info("Successfully cleaned up existing records for CR")
 
-	// Insert/Update multi_subnet with CR lifecycle timestamps
+	// Insert/Update multi_subnet
 	createdAt := openstackConfig.CreationTimestamp.Time
 	modifiedAt := time.Now()
 
@@ -619,114 +664,136 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 	)
 	if err != nil {
 		log.Error(err, "Failed to insert subnet information")
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 
 	log.Info("Successfully inserted/updated subnet information",
 		"subnet_id", subnet.ID,
 		"subnet_name", subnet.Name,
 		"cidr", subnet.CIDR,
-		"network_id", subnet.NetworkID,
-		"created_at", createdAt,
-		"modified_at", modifiedAt)
+		"network_id", subnet.NetworkID)
 
-	// Insert into node_table first (before multi_interface due to foreign key)
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO node_table (attached_node_id, attached_node_name, status, created_at, modified_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE
-		attached_node_name=VALUES(attached_node_name), status=VALUES(status), modified_at=VALUES(modified_at)`,
-		targetVM.ID, targetVM.Name, "active", createdAt, modifiedAt,
-	)
-	if err != nil {
-		log.Error(err, "Failed to insert node information")
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+	// Batch insert nodes - prepare all node data first
+	nodeValues := make([]interface{}, 0, len(targetVMs)*5)
+	nodePlaceholders := make([]string, 0, len(targetVMs))
+
+	for _, targetVM := range targetVMs {
+		nodePlaceholders = append(nodePlaceholders, "(?, ?, ?, ?, ?)")
+		nodeValues = append(nodeValues, targetVM.ID, targetVM.Name, "active", createdAt, modifiedAt)
 	}
 
-	log.Info("Successfully inserted/updated node information",
-		"node_id", targetVM.ID,
-		"node_name", targetVM.Name,
-		"created_at", createdAt,
-		"modified_at", modifiedAt)
+	// Batch insert all nodes
+	if len(nodeValues) > 0 {
+		nodeQuery := fmt.Sprintf(`
+			INSERT INTO node_table (attached_node_id, attached_node_name, status, created_at, modified_at)
+			VALUES %s
+			ON DUPLICATE KEY UPDATE
+			attached_node_name=VALUES(attached_node_name), status=VALUES(status), modified_at=VALUES(modified_at)`,
+			strings.Join(nodePlaceholders, ", "))
 
-	// Get port information for the server
-	for _, addresses := range targetVM.Addresses {
-		for _, address := range addresses.([]interface{}) {
-			addr := address.(map[string]interface{})
+		_, err = tx.ExecContext(ctx, nodeQuery, nodeValues...)
+		if err != nil {
+			log.Error(err, "Failed to batch insert node information")
+			nextRequeue := r.getNextReconcileInterval(triggerConfig)
+			return ctrl.Result{RequeueAfter: nextRequeue}, err
+		}
+		log.Info("Successfully batch inserted/updated node information", "count", len(targetVMs))
+	}
 
-			// type과 mac_addr 필드 체크 (port는 없을 수 있음)
-			if addr["OS-EXT-IPS:type"] == nil || addr["OS-EXT-IPS-MAC:mac_addr"] == nil {
-				log.Info("Skipping address entry due to missing required fields",
-					"address", addr,
-					"has_type", addr["OS-EXT-IPS:type"] != nil,
-					"has_mac", addr["OS-EXT-IPS-MAC:mac_addr"] != nil)
-				continue
-			}
+	// Process network interfaces for all VMs
+	interfaceValues := make([]interface{}, 0)
+	interfacePlaceholders := make([]string, 0)
+	vmNetworkInfos := make([]multinicv1alpha1.VMNetworkInfo, 0, len(targetVMs))
 
-			if addr["OS-EXT-IPS:type"].(string) == "fixed" {
-				macAddr, ok := addr["OS-EXT-IPS-MAC:mac_addr"].(string)
-				if !ok {
-					log.Info("MAC address is not a string, skipping", "mac", addr["OS-EXT-IPS-MAC:mac_addr"])
+	for _, targetVM := range targetVMs {
+		vmNetworkInfo := multinicv1alpha1.VMNetworkInfo{
+			VMName:     targetVM.Name,
+			SubnetID:   subnet.ID,
+			NetworkID:  subnet.NetworkID,
+			IPAddress:  targetVM.AccessIPv4,
+			MACAddress: "",
+			Status:     "active",
+			Message:    "Successfully processed",
+		}
+
+		// Process network addresses
+		for _, addresses := range targetVM.Addresses {
+			for _, address := range addresses.([]interface{}) {
+				addr := address.(map[string]interface{})
+
+				if addr["OS-EXT-IPS:type"] == nil || addr["OS-EXT-IPS-MAC:mac_addr"] == nil {
 					continue
 				}
 
-				var portID string
-
-				// port 필드가 있으면 직접 사용
-				if addr["port"] != nil {
-					if id, ok := addr["port"].(string); ok {
-						portID = id
-						log.Info("Using port ID from VM address info", "port_id", portID, "mac_addr", macAddr)
-					}
-				}
-
-				// port 필드가 없거나 유효하지 않으면 MAC 주소로 포트 조회
-				if portID == "" {
-					log.Info("Port ID not available, searching by MAC address", "mac_addr", macAddr)
-
-					// MAC 주소로 포트 조회
-					foundPortID, err := r.findPortByMACAddress(ctx, openstackConfig, macAddr, subnet.ID)
-					if err != nil {
-						log.Error(err, "Failed to find port by MAC address", "mac_addr", macAddr)
+				if addr["OS-EXT-IPS:type"].(string) == "fixed" {
+					macAddr, ok := addr["OS-EXT-IPS-MAC:mac_addr"].(string)
+					if !ok {
 						continue
 					}
-					if foundPortID == "" {
-						log.Info("No port found for MAC address", "mac_addr", macAddr)
-						continue
+
+					var portID string
+					if addr["port"] != nil {
+						if id, ok := addr["port"].(string); ok {
+							portID = id
+						}
 					}
-					portID = foundPortID
-					log.Info("Found port ID by MAC address", "port_id", portID, "mac_addr", macAddr)
-				}
 
-				// Insert into multi_interface
-				_, err = tx.ExecContext(ctx, `
-					INSERT INTO multi_interface (port_id, subnet_id, macaddress, attached_node_id, attached_node_name, cr_namespace, cr_name, status, netplan_success, created_at, modified_at)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-					ON DUPLICATE KEY UPDATE
-					macaddress=?, attached_node_id=?, attached_node_name=?, status=?, netplan_success=?, modified_at=?`,
-					portID, subnet.ID, macAddr, targetVM.ID, targetVM.Name, openstackConfig.Namespace, openstackConfig.Name, "active", 0, createdAt, modifiedAt,
-					macAddr, targetVM.ID, targetVM.Name, "active", 0, modifiedAt,
-				)
-				if err != nil {
-					log.Error(err, "Failed to insert interface information")
-					return ctrl.Result{RequeueAfter: reconcileInterval}, err
-				}
+					if portID == "" {
+						foundPortID, err := r.findPortByMACAddress(ctx, openstackConfig, macAddr, subnet.ID)
+						if err != nil {
+							log.Info("Error finding port for MAC address, skipping", "mac_addr", macAddr, "error", err)
+							continue
+						}
+						if foundPortID == "" {
+							// This is normal - VM may have interfaces on multiple networks
+							// Only process interfaces that belong to the target subnet
+							log.V(1).Info("MAC address not found in target subnet, skipping", "mac_addr", macAddr, "target_subnet_id", subnet.ID)
+							continue
+						}
+						portID = foundPortID
+					}
 
-				log.Info("Successfully inserted interface information",
-					"port_id", portID,
-					"mac_address", macAddr,
-					"vm_id", targetVM.ID,
-					"subnet_id", subnet.ID,
-					"created_at", createdAt,
-					"modified_at", modifiedAt)
+					// Collect interface data for batch insert
+					interfacePlaceholders = append(interfacePlaceholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+					interfaceValues = append(interfaceValues,
+						portID, subnet.ID, macAddr, targetVM.ID, targetVM.Name,
+						openstackConfig.Namespace, openstackConfig.Name, "active", 0, createdAt, modifiedAt)
+
+					// Update VM network info with MAC address
+					if vmNetworkInfo.MACAddress == "" {
+						vmNetworkInfo.MACAddress = macAddr
+					}
+				}
 			}
 		}
+		vmNetworkInfos = append(vmNetworkInfos, vmNetworkInfo)
+	}
+
+	// Batch insert all interfaces
+	if len(interfaceValues) > 0 {
+		interfaceQuery := fmt.Sprintf(`
+			INSERT INTO multi_interface (port_id, subnet_id, macaddress, attached_node_id, attached_node_name, cr_namespace, cr_name, status, netplan_success, created_at, modified_at)
+			VALUES %s
+			ON DUPLICATE KEY UPDATE
+			macaddress=VALUES(macaddress), attached_node_id=VALUES(attached_node_id), attached_node_name=VALUES(attached_node_name), 
+			status=VALUES(status), netplan_success=VALUES(netplan_success), modified_at=VALUES(modified_at)`,
+			strings.Join(interfacePlaceholders, ", "))
+
+		_, err = tx.ExecContext(ctx, interfaceQuery, interfaceValues...)
+		if err != nil {
+			log.Error(err, "Failed to batch insert interface information")
+			nextRequeue := r.getNextReconcileInterval(triggerConfig)
+			return ctrl.Result{RequeueAfter: nextRequeue}, err
+		}
+		log.Info("Successfully batch inserted interface information", "count", len(interfacePlaceholders))
 	}
 
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		log.Error(err, "Failed to commit transaction")
-		return ctrl.Result{RequeueAfter: reconcileInterval}, err
+		nextRequeue := r.getNextReconcileInterval(triggerConfig)
+		return ctrl.Result{RequeueAfter: nextRequeue}, err
 	}
 
 	// Ensure DB connection is properly maintained after transaction
@@ -739,19 +806,22 @@ func (r *OpenstackConfigReconciler) reconcileNormal(ctx context.Context, opensta
 	openstackConfig.Status.Status = "Completed"
 	openstackConfig.Status.LastUpdated = metav1.Now()
 	openstackConfig.Status.Message = "Successfully updated VM and network information"
-	openstackConfig.Status.NetworkInfo = multinicv1alpha1.NetworkInfo{
-		SubnetID:   subnet.ID,
-		NetworkID:  subnet.NetworkID,
-		IPAddress:  targetVM.AccessIPv4,
-		MACAddress: "", // Will be populated when we get network interface details
-	}
+
+	// vmNetworkInfos is already created above during interface processing
+	openstackConfig.Status.VMNetworkInfos = vmNetworkInfos
 
 	if err := r.Client.Status().Update(ctx, openstackConfig); err != nil {
 		log.Error(err, "Failed to update OpenstackConfig status")
 		return ctrl.Result{RequeueAfter: time.Second * 10}, err
 	}
 
-	return ctrl.Result{RequeueAfter: reconcileInterval}, nil
+	// Calculate next reconcile interval based on trigger configuration
+	nextRequeue := r.getNextReconcileInterval(triggerConfig)
+	log.Info("Reconcile completed successfully",
+		"nextRequeue", nextRequeue,
+		"triggerMode", triggerConfig.Mode)
+
+	return ctrl.Result{RequeueAfter: nextRequeue}, nil
 }
 
 // getSubnetInfo gets subnet information (extracted for reuse)
@@ -924,6 +994,10 @@ func (r *OpenstackConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Note: Database connection will be established on first reconcile
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&multinicv1alpha1.OpenstackConfig{}).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: 1,
+		}).
+		WithEventFilter(NewTimerBasedPredicate(mgr.GetClient())).
 		Complete(r)
 }
 
@@ -1272,14 +1346,14 @@ func (r *OpenstackConfigReconciler) findPortByMACAddress(ctx context.Context, op
 				return port.ID, nil
 			}
 		}
-		log.Info("Port found but not in target subnet",
+		log.V(1).Info("Port found but not in target subnet",
 			"mac_addr", macAddr,
 			"port_id", port.ID,
 			"port_subnets", port.FixedIPs,
 			"target_subnet_id", targetSubnetID)
 	}
 
-	log.Info("No ports found in target subnet for MAC address", "mac_addr", macAddr, "target_subnet_id", targetSubnetID)
+	log.V(1).Info("No ports found in target subnet for MAC address", "mac_addr", macAddr, "target_subnet_id", targetSubnetID)
 	return "", nil
 }
 
@@ -1287,15 +1361,15 @@ func (r *OpenstackConfigReconciler) findPortByMACAddress(ctx context.Context, op
 func (r *OpenstackConfigReconciler) calculateCRHash(openstackConfig *multinicv1alpha1.OpenstackConfig) (string, error) {
 	// Create a structure that contains only the fields that matter for reconciliation
 	specData := struct {
-		AuthURL         string `json:"auth_url"`
-		Username        string `json:"username"`
-		Password        string `json:"password"`
-		ProjectID       string `json:"project_id"`
-		DomainName      string `json:"domain_name"`
-		NetworkEndpoint string `json:"network_endpoint"`
-		ComputeEndpoint string `json:"compute_endpoint"`
-		VMName          string `json:"vm_name"`
-		SubnetName      string `json:"subnet_name"`
+		AuthURL         string   `json:"auth_url"`
+		Username        string   `json:"username"`
+		Password        string   `json:"password"`
+		ProjectID       string   `json:"project_id"`
+		DomainName      string   `json:"domain_name"`
+		NetworkEndpoint string   `json:"network_endpoint"`
+		ComputeEndpoint string   `json:"compute_endpoint"`
+		VMNames         []string `json:"vm_names"`
+		SubnetName      string   `json:"subnet_name"`
 	}{
 		AuthURL:         openstackConfig.Spec.Credentials.AuthURL,
 		Username:        openstackConfig.Spec.Credentials.Username,
@@ -1304,7 +1378,7 @@ func (r *OpenstackConfigReconciler) calculateCRHash(openstackConfig *multinicv1a
 		DomainName:      openstackConfig.Spec.Credentials.DomainName,
 		NetworkEndpoint: openstackConfig.Spec.Credentials.NetworkEndpoint,
 		ComputeEndpoint: openstackConfig.Spec.Credentials.ComputeEndpoint,
-		VMName:          openstackConfig.Spec.VMName,
+		VMNames:         openstackConfig.Spec.VMNames,
 		SubnetName:      openstackConfig.Spec.SubnetName,
 	}
 
@@ -1378,4 +1452,269 @@ func (r *OpenstackConfigReconciler) hasCRChanged(ctx context.Context, openstackC
 	}
 
 	return hasChanged, nil
+}
+
+// getReconcileTriggerConfig retrieves the reconcile trigger configuration from MultiNicOperator
+func (r *OpenstackConfigReconciler) getReconcileTriggerConfig(ctx context.Context, namespace string) (*multinicv1alpha1.ReconcileTriggerConfig, error) {
+	log := log.FromContext(ctx)
+
+	// List all MultiNicOperator CRs in the namespace
+	multinicOperatorList := &multinicv1alpha1.MultiNicOperatorList{}
+	err := r.Client.List(ctx, multinicOperatorList, client.InNamespace(namespace))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list MultiNicOperator CRs: %v", err)
+	}
+
+	// If no MultiNicOperator found, use default configuration
+	if len(multinicOperatorList.Items) == 0 {
+		log.Info("No MultiNicOperator found, using default trigger configuration")
+		return &multinicv1alpha1.ReconcileTriggerConfig{
+			Mode:                "immediate",
+			ImmediateOnCRChange: true,
+		}, nil
+	}
+
+	// Use the first MultiNicOperator's configuration
+	// In practice, there should be only one per namespace
+	operator := multinicOperatorList.Items[0]
+	if len(multinicOperatorList.Items) > 1 {
+		log.Info("Multiple MultiNicOperator CRs found, using the first one",
+			"count", len(multinicOperatorList.Items),
+			"selected", operator.Name)
+	}
+
+	// Set defaults if not specified
+	config := operator.Spec.ReconcileTrigger
+	if config.Mode == "" {
+		config.Mode = "immediate"
+	}
+	if config.Mode == "immediate" {
+		config.ImmediateOnCRChange = true
+	}
+
+	return &config, nil
+}
+
+// shouldReconcile determines if the reconcile should proceed based on the trigger configuration
+func (r *OpenstackConfigReconciler) shouldReconcile(ctx context.Context, triggerConfig *multinicv1alpha1.ReconcileTriggerConfig, hasChanged bool) (bool, time.Duration) {
+	log := log.FromContext(ctx)
+
+	// Always reconcile immediately on CR changes if ImmediateOnCRChange is true
+	if hasChanged && triggerConfig.ImmediateOnCRChange {
+		log.Info("Immediate reconcile triggered by CR change event")
+		return true, 0
+	}
+
+	switch triggerConfig.Mode {
+	case "manual":
+		// Only reconcile on CR changes, not on periodic reconciles
+		if hasChanged {
+			log.Info("Manual mode: reconciling due to CR change")
+			return true, 0
+		}
+		log.Info("Manual mode: skipping periodic reconcile")
+		return false, time.Hour * 24 // Check again in 24 hours
+
+	case "scheduled":
+		if hasChanged {
+			// CR change event - reconcile immediately if ImmediateOnCRChange is true
+			shouldReconcileNow := triggerConfig.ImmediateOnCRChange
+			if shouldReconcileNow {
+				log.Info("Scheduled mode: immediate reconcile due to CR change")
+				return true, 0
+			} else {
+				log.Info("Scheduled mode: CR changed but immediateOnCRChange is false, will wait for scheduled interval")
+				interval := r.parseInterval(triggerConfig.Interval)
+				if interval > 0 {
+					return false, interval
+				}
+				return false, reconcileInterval
+			}
+		}
+
+		// For scheduled mode, always reconcile on periodic intervals
+		// This ensures regular sync with OpenStack at the specified interval
+		interval := r.parseInterval(triggerConfig.Interval)
+		if interval > 0 {
+			log.Info("Scheduled mode: periodic reconcile triggered", "interval", interval)
+			return true, interval
+		}
+
+		// Fallback to default interval if parsing fails
+		log.Info("Scheduled mode: using default interval")
+		return true, reconcileInterval
+
+	default:
+		// Default behavior: treat unknown modes (including legacy "immediate" and "webhook") as manual mode
+		log.Info("Unknown or legacy trigger mode, treating as manual mode", "mode", triggerConfig.Mode)
+		if hasChanged {
+			return true, 0
+		}
+		return false, time.Hour * 24
+	}
+}
+
+// getNextReconcileInterval retrieves the next reconcile interval based on the trigger configuration
+func (r *OpenstackConfigReconciler) getNextReconcileInterval(triggerConfig *multinicv1alpha1.ReconcileTriggerConfig) time.Duration {
+	switch triggerConfig.Mode {
+	case "scheduled":
+		interval := r.parseInterval(triggerConfig.Interval)
+		if interval > 0 {
+			return interval
+		}
+		return reconcileInterval
+
+	case "manual":
+		return time.Hour * 24 // Check infrequently for manual mode
+
+	default:
+		return reconcileInterval
+	}
+}
+
+// parseInterval parses interval string (e.g., "5m", "1h", "30s")
+func (r *OpenstackConfigReconciler) parseInterval(interval string) time.Duration {
+	if interval == "" {
+		return 0
+	}
+
+	duration, err := time.ParseDuration(interval)
+	if err != nil {
+		log.Log.Error(err, "Failed to parse interval", "interval", interval)
+		return 0
+	}
+
+	// Ensure minimum interval of 1 minute
+	if duration < time.Minute {
+		return time.Minute
+	}
+
+	return duration
+}
+
+// TimerBasedPredicate는 MultiNicOperator CR의 트리거 설정에 따라 reconcile을 제어합니다
+type TimerBasedPredicate struct {
+	client            client.Client
+	lastReconcileTime sync.Map // namespace -> time.Time
+}
+
+func NewTimerBasedPredicate(client client.Client) *TimerBasedPredicate {
+	return &TimerBasedPredicate{
+		client: client,
+	}
+}
+
+func (p *TimerBasedPredicate) Create(e event.CreateEvent) bool {
+	// Creation 이벤트는 항상 허용
+	return true
+}
+
+func (p *TimerBasedPredicate) Delete(e event.DeleteEvent) bool {
+	// Deletion 이벤트는 항상 허용
+	return true
+}
+
+func (p *TimerBasedPredicate) Update(e event.UpdateEvent) bool {
+	// Spec이 변경된 경우 항상 허용
+	if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
+		return true
+	}
+
+	// Status update로 인한 reconcile인 경우 시간 기반 제어
+	return p.shouldReconcileBasedOnTimer(e.ObjectNew)
+}
+
+func (p *TimerBasedPredicate) Generic(e event.GenericEvent) bool {
+	// Generic 이벤트는 시간 기반으로 제어
+	return p.shouldReconcileBasedOnTimer(e.Object)
+}
+
+func (p *TimerBasedPredicate) shouldReconcileBasedOnTimer(obj client.Object) bool {
+	ctx := context.Background()
+
+	// MultiNicOperator CR에서 트리거 설정 가져오기
+	triggerConfig, err := p.getReconcileTriggerConfig(ctx, obj.GetNamespace())
+	if err != nil {
+		// 오류 시 기본적으로 허용
+		return true
+	}
+
+	// Manual 모드는 spec 변경 시에만 허용
+	if triggerConfig.Mode == "manual" {
+		return false
+	}
+
+	// Legacy immediate, webhook 모드는 manual 모드로 처리
+	if triggerConfig.Mode == "immediate" || triggerConfig.Mode == "webhook" || triggerConfig.Mode == "" {
+		return false
+	}
+
+	// Scheduled 모드의 경우 시간 체크
+	if triggerConfig.Mode == "scheduled" {
+		key := obj.GetNamespace() + "/" + obj.GetName()
+		lastTime, exists := p.lastReconcileTime.Load(key)
+
+		if !exists {
+			// 첫 번째 reconcile인 경우 허용
+			p.lastReconcileTime.Store(key, time.Now())
+			return true
+		}
+
+		interval := p.parseInterval(triggerConfig.Interval)
+		if interval == 0 {
+			interval = time.Minute // 기본값
+		}
+
+		if time.Since(lastTime.(time.Time)) >= interval {
+			p.lastReconcileTime.Store(key, time.Now())
+			return true
+		}
+
+		return false
+	}
+
+	// 기본적으로 허용
+	return true
+}
+
+func (p *TimerBasedPredicate) getReconcileTriggerConfig(ctx context.Context, namespace string) (*multinicv1alpha1.ReconcileTriggerConfig, error) {
+	multinicOperatorList := &multinicv1alpha1.MultiNicOperatorList{}
+	err := p.client.List(ctx, multinicOperatorList, client.InNamespace(namespace))
+	if err != nil {
+		return nil, err
+	}
+
+	if len(multinicOperatorList.Items) == 0 {
+		return &multinicv1alpha1.ReconcileTriggerConfig{
+			Mode:                "immediate",
+			ImmediateOnCRChange: true,
+		}, nil
+	}
+
+	config := multinicOperatorList.Items[0].Spec.ReconcileTrigger
+	if config.Mode == "" {
+		config.Mode = "immediate"
+	}
+	if config.Mode == "immediate" {
+		config.ImmediateOnCRChange = true
+	}
+
+	return &config, nil
+}
+
+func (p *TimerBasedPredicate) parseInterval(interval string) time.Duration {
+	if interval == "" {
+		return 0
+	}
+
+	duration, err := time.ParseDuration(interval)
+	if err != nil {
+		return 0
+	}
+
+	if duration < time.Minute {
+		return time.Minute
+	}
+
+	return duration
 }
