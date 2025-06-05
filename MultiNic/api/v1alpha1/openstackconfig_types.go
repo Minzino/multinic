@@ -28,8 +28,8 @@ type OpenstackConfigSpec struct {
 	// SubnetName is the name of the OpenStack subnet
 	SubnetName string `json:"subnetName"`
 
-	// VMName is the name of the OpenStack VM
-	VMName string `json:"vmName"`
+	// VMNames is a list of OpenStack VM names to monitor
+	VMNames []string `json:"vmNames"`
 
 	// OpenStackCredentials contains the credentials for OpenStack API
 	Credentials OpenStackCredentials `json:"credentials"`
@@ -72,11 +72,36 @@ type OpenstackConfigStatus struct {
 	// Message provides additional information about the current status
 	Message string `json:"message,omitempty"`
 
-	// NetworkInfo contains the network information retrieved from OpenStack
-	NetworkInfo NetworkInfo `json:"networkInfo,omitempty"`
+	// VMNetworkInfos contains the network information for each VM retrieved from OpenStack
+	VMNetworkInfos []VMNetworkInfo `json:"vmNetworkInfos,omitempty"`
+}
+
+// VMNetworkInfo contains the network information for a specific VM from OpenStack
+type VMNetworkInfo struct {
+	// VMName is the name of the VM
+	VMName string `json:"vmName"`
+
+	// SubnetID is the ID of the OpenStack subnet
+	SubnetID string `json:"subnetID,omitempty"`
+
+	// NetworkID is the ID of the OpenStack network
+	NetworkID string `json:"networkID,omitempty"`
+
+	// IPAddress is the IP address assigned to the VM
+	IPAddress string `json:"ipAddress,omitempty"`
+
+	// MACAddress is the MAC address of the VM's network interface
+	MACAddress string `json:"macAddress,omitempty"`
+
+	// Status represents the status of this specific VM
+	Status string `json:"status,omitempty"`
+
+	// Message provides additional information about this VM's status
+	Message string `json:"message,omitempty"`
 }
 
 // NetworkInfo contains the network information from OpenStack
+// +deprecated Use VMNetworkInfo instead for better multi-VM support
 type NetworkInfo struct {
 	// SubnetID is the ID of the OpenStack subnet
 	SubnetID string `json:"subnetID,omitempty"`

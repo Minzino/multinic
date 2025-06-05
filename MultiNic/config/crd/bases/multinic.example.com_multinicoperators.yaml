@@ -178,6 +178,32 @@ spec:
                     description: Enable protection against direct modifications
                     type: boolean
                 type: object
+              reconcileTrigger:
+                description: Reconcile trigger configuration
+                properties:
+                  immediateOnCRChange:
+                    description: |-
+                      Enable immediate reconcile on OpenstackConfig CR changes
+                      This overrides the mode setting for CR events
+                    type: boolean
+                  interval:
+                    description: Interval for scheduled mode (e.g., "5m", "1h")
+                    type: string
+                  mode:
+                    description: |-
+                      Mode defines the reconcile trigger mode
+                      - "immediate": Always reconcile immediately (default)
+                      - "scheduled": Only reconcile at scheduled intervals
+                      - "manual": Only reconcile when manually triggered
+                      - "webhook": Reconcile when triggered by webhook
+                    type: string
+                  schedule:
+                    description: Schedule for scheduled mode (cron format)
+                    type: string
+                  timezone:
+                    description: Timezone for scheduled reconcile
+                    type: string
+                type: object
             required:
             - controller
             - database

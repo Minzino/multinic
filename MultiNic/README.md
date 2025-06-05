@@ -79,7 +79,10 @@ kind: OpenstackConfig
 metadata:
   name: openstack-config
 spec:
-  vmName: "test-tg"
+  vmNames:
+    - "test-vm-1"
+    - "test-vm-2"
+    - "test-vm-3"
   subnetName: "k8s-subnet"
   credentials:
     authURL: "http://110.0.0.100:5000"
@@ -90,6 +93,169 @@ spec:
     networkEndpoint: "http://110.0.0.100:9696"
     computeEndpoint: "http://110.0.0.100:8774"
 ```
+
+## 🎯 Reconcile Trigger 설정
+
+MultiNic은 유연한 reconcile 트리거 시스템을 제공합니다. MultiNicOperator CR의 `reconcileTrigger` 설정으로 OpenStack API 호출 패턴을 제어할 수 있습니다.
+
+### 🔄 Trigger 모드
+
+| 모드 | 설명 | 사용 사례 |
+|------|------|-----------|
+| `immediate` | 모든 변경에 즉시 응답 (기본값) | 개발 환경, 실시간 동기화 필요 |
+| `scheduled` | 정해진 간격으로만 reconcile | 운영 환경, API 호출 제한 |
+| `manual` | OpenstackConfig CR 변경시만 | 수동 관리, 최소 API 호출 |
+| `webhook` | 웹훅 트리거 기반 | 외부 시스템 연동 |
+
+### ⚡ Immediate 모드 (기본값)
+
+```yaml
+apiVersion: multinic.example.com/v1alpha1
+kind: MultiNicOperator
+metadata:
+  name: immediate-operator
+  namespace: multinic-system
+spec:
+  # ... other configs ...
+  reconcileTrigger:
+    mode: "immediate"
+    immediateOnCRChange: true
+```
+
+**특징:**
+- 모든 변경사항에 즉시 응답
+- 최고의 동기화 성능
+- 높은 API 호출 빈도
+
+### ⏰ Scheduled 모드
+
+```yaml
+apiVersion: multinic.example.com/v1alpha1
+kind: MultiNicOperator
+metadata:
+  name: scheduled-operator
+  namespace: multinic-system
+spec:
+  # ... other configs ...
+  reconcileTrigger:
+    mode: "scheduled"
+    interval: "15m"  # 15분마다 reconcile
+    immediateOnCRChange: true  # CR 변경시에는 즉시 실행
+    timezone: "UTC"
+```
+
+**특징:**
+- 정해진 간격으로만 OpenStack API 호출
+- OpenstackConfig CR 변경시에는 즉시 응답 (immediateOnCRChange=true)
+- API 호출 빈도 제어로 시스템 부하 감소
+
+### 🎮 Manual 모드
+
+```yaml
+apiVersion: multinic.example.com/v1alpha1
+kind: MultiNicOperator
+metadata:
+  name: manual-operator
+  namespace: multinic-system
+spec:
+  # ... other configs ...
+  reconcileTrigger:
+    mode: "manual"
+    immediateOnCRChange: true  # CR 변경시만 실행
+```
+
+**특징:**
+- OpenstackConfig 생성/수정/삭제시만 reconcile
+- 주기적 reconcile 없음
+- 최소한의 API 호출
+
+### 🌐 Webhook 모드
+
+```yaml
+apiVersion: multinic.example.com/v1alpha1
+kind: MultiNicOperator
+metadata:
+  name: webhook-operator
+  namespace: multinic-system
+spec:
+  # ... other configs ...
+  reconcileTrigger:
+    mode: "webhook"
+    immediateOnCRChange: true
+```
+
+**특징:**
+- 외부 웹훅으로 reconcile 트리거
+- OpenstackConfig CR 변경시에는 즉시 응답
+- 외부 시스템과의 연동에 적합
+
+### 📊 동작 방식
+
+```mermaid
+graph TD
+    A[OpenstackConfig 변경] --> B{immediateOnCRChange?}
+    B -->|Yes| C[즉시 Reconcile 실행]
+    B -->|No| D[Trigger 모드 확인]
+    
+    D --> E{모드 타입}
+    E -->|immediate| C
+    E -->|scheduled| F[스케줄 대기]
+    E -->|manual| G[스킵]
+    E -->|webhook| H[웹훅 대기]
+    
+    F --> I[간격 도달시 실행]
+    H --> J[웹훅 수신시 실행]
+    
+    C --> K[OpenStack API 호출]
+    I --> K
+    J --> K
+```
+
+### 🛠️ 실제 사용 예시
+
+#### 개발 환경
+```yaml
+reconcileTrigger:
+  mode: "immediate"
+  immediateOnCRChange: true
+```
+
+#### 운영 환경 (부하 제어)
+```yaml
+reconcileTrigger:
+  mode: "scheduled"
+  interval: "30m"
+  immediateOnCRChange: true
+```
+
+#### 유지보수 환경
+```yaml
+reconcileTrigger:
+  mode: "manual"
+  immediateOnCRChange: true
+```
+
+### 📝 로그 모니터링
+
+Reconcile trigger 동작은 로그로 확인할 수 있습니다:
+
+```bash
+# Trigger 설정 확인
+kubectl logs -f deployment/multinic-controller -n multinic-system | grep "trigger"
+
+# 예시 로그 출력:
+# "Proceeding with reconcile" mode="scheduled" isCRChangeEvent=true
+# "Reconcile skipped due to trigger configuration" mode="manual" isCRChangeEvent=false
+# "Immediate reconcile triggered by CR change event"
+# "Reconcile completed successfully" triggerMode="scheduled" nextRequeue="15m"
+```
+
+### ⚠️ 중요 사항
+
+1. **CR 변경시 즉시 처리**: `immediateOnCRChange: true`이면 모든 모드에서 CR 변경시 즉시 reconcile
+2. **Hash 기반 변경 감지**: 실제 변경사항이 있을 때만 OpenStack API 호출
+3. **모드별 Requeue 간격**: 각 모드에 따라 다음 reconcile 시점 자동 조정
+4. **기본값 제공**: 설정이 없으면 immediate 모드로 동작
 
 ## 📊 모니터링
 

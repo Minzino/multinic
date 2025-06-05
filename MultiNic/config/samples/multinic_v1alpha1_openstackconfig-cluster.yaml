@@ -1,7 +1,7 @@
 apiVersion: multinic.example.com/v1alpha1
 kind: OpenstackConfig
 metadata:
-  name: test-config2
+  name: test-config
 spec:
   credentials:
     authURL: "https://121.141.64.224:15000"
@@ -11,8 +11,6 @@ spec:
     domainName: "default"
     networkEndpoint: "https://121.141.64.224:19696"
     computeEndpoint: "https://121.141.64.224:18774"
-  subnetName: "internal-subnet"
+  subnetName: "k8s-subnet"
   vmNames: 
     - "tg-cluster-1"
-    - "tg-cluster-2"
-    - "tg-cluster-3"
