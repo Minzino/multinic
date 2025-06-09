@@ -6,11 +6,12 @@ echo "🧹 MultiNic 시스템 정리 시작..."
 
 # 1. Controller 삭제
 echo "🎮 Controller 삭제..."
-make undeploy || true
+cd .. && make undeploy || true
+cd script
 
 # 2. MariaDB 삭제
 echo "🗄️ MariaDB 삭제..."
-kubectl delete -f config/database/mariadb.yaml || true
+kubectl delete -f ../config/database/mariadb.yaml || true
 
 # 3. PVC 삭제 (데이터도 함께 삭제됨)
 echo "💾 PVC 삭제..."
@@ -19,7 +20,8 @@ kubectl delete pvc mysql-storage-mariadb-0 -n multinic-system || true
 
 # 4. CRD 삭제
 echo "🔧 CRD 삭제..."
-make uninstall || true
+cd .. && make uninstall || true
+cd script
 
 # 5. 네임스페이스 삭제
 echo "📁 네임스페이스 삭제..."

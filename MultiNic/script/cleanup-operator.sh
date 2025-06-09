@@ -22,7 +22,7 @@ fi
 
 # 2. Operator 배포 삭제
 echo -e "\n${BLUE}🤖 2단계: MultiNic Operator 삭제${NC}"
-kubectl delete -k config/operator/ --ignore-not-found=true
+kubectl delete -k ../config/operator/ --ignore-not-found=true
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✅ Operator 삭제 완료${NC}"
 else
@@ -48,7 +48,7 @@ echo -e "${GREEN}✅ 보호된 리소스 정리 완료${NC}"
 
 # 4. CRD 삭제
 echo -e "\n${BLUE}📋 4단계: CRD 삭제${NC}"
-kubectl delete -f config/crd/bases/ --ignore-not-found=true
+kubectl delete -f ../config/crd/bases/ --ignore-not-found=true
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✅ CRD 삭제 완료${NC}"
 else

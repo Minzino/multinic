@@ -2,6 +2,7 @@ apiVersion: multinic.example.com/v1alpha1
 kind: OpenstackConfig
 metadata:
   name: test-config2
+  namespace: multinic-system
 spec:
   credentials:
     authURL: "https://121.141.64.224:15000"

@@ -17,7 +17,7 @@ spec:
   #mode: immediate, scheduled, manual
   reconcileTrigger:
     mode: "scheduled"
-    interval: "1m"
+    interval: "180s"
     immediateOnCRChange: true
 
   database:
