@@ -13,7 +13,7 @@ NC='\033[0m' # No Color
 
 # 1. Docker 이미지 빌드
 echo -e "\n${BLUE}📦 1단계: Docker 이미지 빌드${NC}"
-nerdctl build --no-cache -t multinic:v1alpha1 .
+cd .. && nerdctl build --no-cache -t multinic:v1alpha1 . && cd script
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✅ Docker 이미지 빌드 완료${NC}"
 else
@@ -43,7 +43,7 @@ echo -e "${GREEN}✅ 모든 노드에 이미지 배포 완료${NC}"
 
 # 2. CRD 적용
 echo -e "\n${BLUE}📋 2단계: CRD 설치${NC}"
-kubectl apply -f config/crd/bases/
+kubectl apply -f ../config/crd/bases/
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✅ CRD 설치 완료${NC}"
 else
@@ -63,7 +63,7 @@ fi
 
 # 4. Operator 배포
 echo -e "\n${BLUE}🤖 4단계: MultiNic Operator 배포${NC}"
-kubectl apply -k config/operator/
+kubectl apply -k ../config/operator/
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✅ Operator 배포 완료${NC}"
 else
@@ -83,7 +83,7 @@ fi
 
 # 6. MultiNicOperator CR 생성
 echo -e "\n${BLUE}📝 6단계: MultiNicOperator CR 생성${NC}"
-kubectl apply -f config/operator/multinic-operator-cr.yaml
+kubectl apply -f ../config/operator/multinic-operator-cr.yaml
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✅ MultiNicOperator CR 생성 완료${NC}"
 else
