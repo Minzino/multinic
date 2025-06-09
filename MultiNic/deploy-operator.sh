@@ -13,7 +13,7 @@ NC='\033[0m' # No Color
 
 # 1. Docker 이미지 빌드
 echo -e "\n${BLUE}📦 1단계: Docker 이미지 빌드${NC}"
-nerdctl build -t multinic:v1alpha1 .
+nerdctl build --no-cache -t multinic:v1alpha1 .
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✅ Docker 이미지 빌드 완료${NC}"
 else

@@ -12,5 +12,8 @@ resources:
 - operator-role-binding.yaml
 - multinic-operator-cr.yaml
 
-patchesStrategicMerge:
-- operator-manager-patch.yaml
+patches:
+  - path: operator-manager-patch.yaml
+
+  #patchesStrategicMerge:
+  #- operator-manager-patch.yaml
