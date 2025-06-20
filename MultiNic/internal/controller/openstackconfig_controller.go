@@ -48,6 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	multinicv1alpha1 "github.com/xormsdhkdwk/multinic/api/v1alpha1"
+	"github.com/xormsdhkdwk/multinic/internal/types"
 )
 
 const (
@@ -85,32 +86,12 @@ const (
 	openstackMaxRetries = 3
 )
 
-// DatabaseConfig holds database configuration
-type DatabaseConfig struct {
-	Host     string
-	Port     string
-	User     string
-	Password string
-	DBName   string
-}
-
-// OpenstackConfig holds OpenStack configuration
-type OpenstackConfig struct {
-	AuthURL         string
-	Username        string
-	Password        string
-	ProjectID       string
-	DomainName      string
-	NetworkEndpoint string
-	ComputeEndpoint string
-}
-
 // OpenstackConfigReconciler reconciles a OpenstackConfig object
 type OpenstackConfigReconciler struct {
 	client.Client
 	Scheme      *runtime.Scheme
 	DB          *sql.DB
-	DBConfig    *DatabaseConfig
+	DBConfig    *types.DatabaseConfig
 	HTTPClient  *http.Client
 	clientMutex sync.RWMutex
 }
@@ -1178,19 +1159,18 @@ func getMapKeys(m map[string]interface{}) []string {
 }
 
 // getDatabaseConfig returns database configuration from environment or defaults
-func (r *OpenstackConfigReconciler) getDatabaseConfig() *DatabaseConfig {
+func (r *OpenstackConfigReconciler) getDatabaseConfig() *types.DatabaseConfig {
 	if r.DBConfig != nil {
 		return r.DBConfig
 	}
 
-	r.DBConfig = &DatabaseConfig{
+	r.DBConfig = &types.DatabaseConfig{
 		Host:     getEnvOrDefault("DB_HOST", defaultDBHost),
 		Port:     getEnvOrDefault("DB_PORT", defaultDBPort),
 		User:     getEnvOrDefault("DB_USER", defaultDBUserName),
 		Password: getEnvOrDefault("DB_PASSWORD", defaultDBPassword),
 		DBName:   getEnvOrDefault("DB_NAME", defaultDBName),
 	}
-
 	return r.DBConfig
 }
 
